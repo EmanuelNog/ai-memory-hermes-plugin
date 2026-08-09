@@ -4,6 +4,15 @@
 
 ### Added
 
+- `on_pre_compress` — fires a `pre-compact` event at the ai-memory server
+  before Hermes compacts context (checkpoints the session without ending
+  it; captures knowledge at each compression stage of long-running
+  sessions).
+- `on_session_switch` — rebinds the provider's session id when Hermes
+  rotates it on compression / `/resume` / `/branch` / `/new`.
+
+## [0.1.2]
+
 - `scripts/update.sh` — updates the plugin from GitHub by default; backs up the old install to `$HERMES_HOME/.ai-memory-backups/ai-memory.bak.<timestamp>` (outside the Hermes plugins directory so it is not discovered as a plugin); preserves `ai-memory.json`; supports `UPDATE_FROM_LOCAL=true` and `REPO_TARBALL_URL` overrides.
 - `scripts/update.ps1` — Windows equivalent with the same defaults and backup behavior.
 - `hermes ai-memory update` CLI command — downloads the latest plugin from GitHub, backs up the old install, and replaces the plugin files.

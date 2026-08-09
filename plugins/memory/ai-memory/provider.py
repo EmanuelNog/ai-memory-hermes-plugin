@@ -178,6 +178,59 @@ class AiMemoryProvider(MemoryProvider):
 
         threading.Thread(target=_do, daemon=True).start()
 
+    def on_pre_compress(self, messages: list[dict[str, Any]], **kwargs: Any) -> str:
+        """Called by Hermes BEFORE context compression discards messages.
+
+        Hermes v0.19+ calls this hook on every compaction. The ai-memory
+        server implements a ``pre-compact`` hook event that checkpoints the
+        session (refreshes ``sessions/<id>.md`` via LLM consolidation)
+        WITHOUT ending the session — so long-running Hermes sessions get
+        their knowledge captured at each compression stage instead of only
+        at session end (which may be days away or never).
+
+        The hook runs on a pooled daemon thread inside Hermes; the send is
+        fire-and-forget. Returns "" (no contribution to the compression
+        summary prompt — the server-side consolidation is the checkpoint).
+        """
+        sid = self.session_id
+        ws = self._config.workspace
+        proj = self._config.project
+
+        def _do() -> None:
+            try:
+                self._client.send_hook(
+                    event="pre-compact",
+                    session_id=sid,
+                    payload={"messages": messages},
+                    workspace=ws,
+                    project=proj,
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_do, daemon=True).start()
+        return ""
+
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        reason: str = "new_session",
+        **kwargs: Any,
+    ) -> None:
+        """Rebind the provider to the rotated session id.
+
+        Hermes rotates the session_id on context compression, /resume,
+        /branch and /new. Without this hook the provider keeps writing
+        observations to the stale session id after a rotation. A blank
+        new_session_id keeps the current binding (safety default).
+        """
+        if new_session_id:
+            self.session_id = new_session_id
+
     def on_memory_write(
         self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None
     ) -> None:

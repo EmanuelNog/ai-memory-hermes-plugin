@@ -227,3 +227,52 @@ def test_handle_tool_call_propagates_errors(provider: AiMemoryProvider) -> None:
     provider._client.search = MagicMock(side_effect=RuntimeError("search failed"))
     with pytest.raises(RuntimeError):
         provider.handle_tool_call("ai_memory_search", {"query": "test"})
+
+
+def test_on_pre_compress_sends_pre_compact_hook(provider: AiMemoryProvider) -> None:
+    provider.session_id = "sess-precompact"
+    provider._client.send_hook = MagicMock()
+    messages = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]
+
+    result = provider.on_pre_compress(messages)
+
+    # The provider contributes no text to the compression summary prompt —
+    # the server-side PreCompact consolidation is the actual checkpoint.
+    assert result == ""
+    provider._client.send_hook.assert_called_once()
+    call_kwargs = provider._client.send_hook.call_args.kwargs
+    assert call_kwargs["event"] == "pre-compact"
+    assert call_kwargs["session_id"] == "sess-precompact"
+    assert call_kwargs["payload"] == {"messages": messages}
+    assert call_kwargs["workspace"] == provider._config.workspace
+    assert call_kwargs["project"] == provider._config.project
+
+
+def test_on_pre_compress_absorbs_extra_kwargs(provider: AiMemoryProvider) -> None:
+    provider._client.send_hook = MagicMock()
+    result = provider.on_pre_compress([{"role": "user", "content": "x"}], extra_key="val")
+    assert result == ""
+    provider._client.send_hook.assert_called_once()
+
+
+def test_on_pre_compress_swallows_client_errors(provider: AiMemoryProvider) -> None:
+    provider._client.send_hook = MagicMock(side_effect=Exception("boom"))
+    result = provider.on_pre_compress([{"role": "user", "content": "x"}])
+    assert result == ""
+    provider._client.send_hook.assert_called_once()
+
+
+def test_on_session_switch_rebinds_session_id(provider: AiMemoryProvider) -> None:
+    provider.session_id = "old-session"
+    provider._client.send_hook = MagicMock()
+
+    provider.on_session_switch("new-session", parent_session_id="old-session", reason="compression")
+
+    assert provider.session_id == "new-session"
+    provider._client.send_hook.assert_not_called()
+
+
+def test_on_session_switch_keeps_binding_on_blank_new_id(provider: AiMemoryProvider) -> None:
+    provider.session_id = "stable-session"
+    provider.on_session_switch("", reason="new_session")
+    assert provider.session_id == "stable-session"

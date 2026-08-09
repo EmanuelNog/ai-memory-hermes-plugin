@@ -1,11 +1,32 @@
 # ai-memory Hermes Memory Provider Plugin
 
+> **Fork note — pre-compaction checkpointing (2026-08):** this fork adds a
+> simple implementation of Hermes' `on_pre_compress` hook: before Hermes
+> compacts the conversation context, the plugin fires a `pre-compact` event
+> at the ai-memory server, which checkpoints the session (LLM consolidation
+> into `sessions/<id>.md`) WITHOUT ending it. It also implements
+> `on_session_switch` so the provider rebinds to Hermes' rotated session id
+> after compression / `/resume` / `/branch`.
+>
+> **Why hook BEFORE compression instead of after session end:** Hermes
+> sessions are long-running — a session can live for days across many
+> compactions, so `session-end` may never fire (or fire days later, when the
+> knowledge is no longer in context). The compression boundary is the
+> natural "chapter": the messages being discarded are exactly the working
+> state worth preserving. Checkpointing at each compression stage captures
+> knowledge incrementally and keeps the wiki current while the session is
+> still alive. The server already supports this natively (the `pre-compact`
+> hook event, verified on v1.17.3+); this plugin was merely missing the
+> client-side call. Keep this fork in sync with upstream via the normal
+> git merge flow.
+
 Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to [ai-memory](https://github.com/akitaonrails/ai-memory) as a first-class `MemoryProvider` plugin — automatic prefetch, turn sync, session finalization, and wiki search/write tools.
 
 ## Features
 
 - **Auto-prefetch** — wiki context injected before every model turn
 - **Turn capture** — async daemon-thread sync after each completed turn
+- **Pre-compaction checkpointing** — `pre-compact` hook on context compression (fork addition; see note above)
 - **Session finalization** — `session-end` hook on conversation close
 - **Memory mirroring** — built-in `MEMORY.md` writes mirrored to ai-memory wiki
 - **Hermes CLI integration** — `hermes memory setup`, `hermes memory status`
