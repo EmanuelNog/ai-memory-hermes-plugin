@@ -149,6 +149,24 @@ def test_sync_turn_spawns_daemon(provider: AiMemoryProvider) -> None:
     provider._client.send_hook.assert_called_once()
 
 
+def test_sync_turn_payload_uses_server_contract_keys(provider: AiMemoryProvider) -> None:
+    # The ai-memory server extracts observation content from `prompt` /
+    # `message` / `text` keys (payload.rs extract_content). Sending
+    # {user, assistant} produced EMPTY observations — auto-improve then
+    # reviewed content-less sessions and found nothing (body_chars=0 bug,
+    # diagnosed 2026-08-10). The plugin must speak the server's wire format.
+    provider._client.send_hook = MagicMock()
+    provider.sync_turn("user msg", "assistant msg", session_id="sess-1")
+    time.sleep(0.05)
+    payload = provider._client.send_hook.call_args.kwargs["payload"]
+    assert payload["prompt"] == "user msg"
+    assert payload["text"] == "assistant msg"
+    assert payload["messages"] == [
+        {"role": "user", "content": "user msg"},
+        {"role": "assistant", "content": "assistant msg"},
+    ]
+
+
 def test_sync_turn_absorbs_extra_kwargs(provider: AiMemoryProvider) -> None:
     provider._client.send_hook = MagicMock()
     provider.sync_turn(
@@ -163,6 +181,17 @@ def test_on_session_end_spawns_daemon(provider: AiMemoryProvider) -> None:
     provider.on_session_end([{"role": "user", "content": "hello"}])
     time.sleep(0.05)
     provider._client.send_hook.assert_called_once()
+
+
+def test_on_session_end_payload_keeps_messages_for_server(provider: AiMemoryProvider) -> None:
+    # The server's SessionEnd consolidation reads the messages payload —
+    # keep the full list so the session page can be regenerated.
+    provider._client.send_hook = MagicMock()
+    msgs = [{"role": "user", "content": "hello"}]
+    provider.on_session_end(msgs)
+    time.sleep(0.05)
+    payload = provider._client.send_hook.call_args.kwargs["payload"]
+    assert payload["messages"] == msgs
 
 
 def test_on_session_end_absorbs_extra_kwargs(provider: AiMemoryProvider) -> None:
@@ -243,7 +272,9 @@ def test_on_pre_compress_sends_pre_compact_hook(provider: AiMemoryProvider) -> N
     call_kwargs = provider._client.send_hook.call_args.kwargs
     assert call_kwargs["event"] == "pre-compact"
     assert call_kwargs["session_id"] == "sess-precompact"
-    assert call_kwargs["payload"] == {"messages": messages}
+    assert call_kwargs["payload"]["messages"] == messages
+    assert call_kwargs["payload"]["prompt"] == "hello"
+    assert call_kwargs["payload"]["text"] == "hi"
     assert call_kwargs["workspace"] == provider._config.workspace
     assert call_kwargs["project"] == provider._config.project
 

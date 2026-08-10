@@ -150,7 +150,19 @@ class AiMemoryProvider(MemoryProvider):
                 self._client.send_hook(
                     event="user-prompt",
                     session_id=sid,
-                    payload={"user": user, "assistant": assistant},
+                    payload={
+                        # Server wire contract (payload.rs extract_content):
+                        # observation content comes from `prompt` / `message` /
+                        # `text` keys. {user, assistant} alone produced EMPTY
+                        # observations (body_chars=0) — auto-improve reviewed
+                        # content-less sessions and found nothing to propose.
+                        "prompt": user,
+                        "text": assistant,
+                        "messages": [
+                            {"role": "user", "content": user},
+                            {"role": "assistant", "content": assistant},
+                        ],
+                    },
                     workspace=ws,
                     project=proj,
                 )
@@ -169,7 +181,17 @@ class AiMemoryProvider(MemoryProvider):
                 self._client.send_hook(
                     event="session-end",
                     session_id=sid,
-                    payload={"messages": messages},
+                    payload={
+                        "messages": messages,
+                        # Server contract keys so the consolidation LLM gets
+                        # extractable content, not an empty body.
+                        "prompt": "\n".join(
+                            m.get("content", "") for m in messages if m.get("role") == "user"
+                        ),
+                        "text": "\n".join(
+                            m.get("content", "") for m in messages if m.get("role") == "assistant"
+                        ),
+                    },
                     workspace=ws,
                     project=proj,
                 )
@@ -201,7 +223,17 @@ class AiMemoryProvider(MemoryProvider):
                 self._client.send_hook(
                     event="pre-compact",
                     session_id=sid,
-                    payload={"messages": messages},
+                    payload={
+                        "messages": messages,
+                        # Server contract keys: the PreCompact consolidation
+                        # extracts content from prompt/text (payload.rs).
+                        "prompt": "\n".join(
+                            m.get("content", "") for m in messages if m.get("role") == "user"
+                        ),
+                        "text": "\n".join(
+                            m.get("content", "") for m in messages if m.get("role") == "assistant"
+                        ),
+                    },
                     workspace=ws,
                     project=proj,
                 )
