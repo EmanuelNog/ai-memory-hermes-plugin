@@ -22,6 +22,12 @@
 
 Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to [ai-memory](https://github.com/akitaonrails/ai-memory) as a first-class `MemoryProvider` plugin — automatic prefetch, turn sync, session finalization, and wiki search/write tools.
 
+> **Server compatibility (fork policy):** this fork was last tested against
+> ai-memory server **v1.25.0** (2026-08-10). The server MUST always be kept
+> at the version this plugin was tested on: whenever the server version
+> changes (upgrade or downgrade), update this line and verify the whole
+> suite against the new server before treating the plugin as compatible.
+
 ## Features
 
 - **Auto-prefetch** — wiki context injected before every model turn
