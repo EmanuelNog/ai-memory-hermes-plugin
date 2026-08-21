@@ -20,6 +20,9 @@ log = logging.getLogger("ai-memory")
 SEARCH_TIMEOUT = 10.0
 HOOK_TIMEOUT = 0.5
 WRITE_TIMEOUT = 10.0
+# Handoff is fetched once, synchronously, on session start against a
+# loopback server. Keep it short so a stalled server cannot delay startup.
+HANDOFF_TIMEOUT = 2.0
 
 
 class AiMemoryClient:
@@ -50,12 +53,22 @@ class AiMemoryClient:
         project: str | None = None,
         limit: int = 3,
     ) -> list[dict[str, Any]]:
-        payload: dict[str, Any] = {"q": query}
-        if workspace:
-            payload["workspace"] = workspace
-        if project:
-            payload["project"] = project
-        r = self._request("POST", "/api/v1/search", json=payload, timeout=SEARCH_TIMEOUT)
+        """Full-text search the ai-memory wiki.
+
+        ai-memory 1.28.1 exposes ``GET /admin/search?q=&limit=``; the
+        ``POST /api/v1/search`` this used to call does not exist and 404s.
+
+        Scope is all-or-nothing. ai-memory resolves a project *within* a
+        workspace, so a lone ``project=`` has no workspace to resolve
+        against and a lone ``workspace=`` silently widens the scope past
+        what the caller asked for. Passing neither searches globally,
+        across every project — which is what cross-agent recall needs.
+        """
+        params: dict[str, Any] = {"q": query, "limit": limit}
+        if workspace and project:
+            params["workspace"] = workspace
+            params["project"] = project
+        r = self._request("GET", "/admin/search", params=params, timeout=SEARCH_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         if isinstance(data, dict):
@@ -117,9 +130,14 @@ class AiMemoryClient:
         if payload:
             body = payload
         try:
-            self._request("POST", "/hook", params=params, json=body, timeout=HOOK_TIMEOUT)
+            r = self._request("POST", "/hook", params=params, json=body, timeout=HOOK_TIMEOUT)
+            # ai-memory answers 202 for anything it queues, including a
+            # payload whose fields it does not recognise, so a bad shape
+            # used to look identical to a good one. raise_for_status at
+            # least surfaces transport- and route-level failures.
+            r.raise_for_status()
         except Exception:
-            log.exception("hook failed for event=%s", event)
+            log.warning("ai-memory hook failed for event=%s", event, exc_info=True)
 
     def fetch_handoff(
         self,
@@ -135,9 +153,11 @@ class AiMemoryClient:
             params["workspace"] = workspace
         if project:
             params["project"] = project
-        r = self._request("GET", "/handoff", params=params, timeout=SEARCH_TIMEOUT)
+        r = self._request("GET", "/handoff", params=params, timeout=HANDOFF_TIMEOUT)
         if r.status_code == 404:
             return None
         r.raise_for_status()
-        data = r.json()
-        return data.get("handoff", {}).get("summary")
+        # ai-memory 1.28.1 returns the handoff as a markdown block, not a
+        # JSON envelope: r.json() raised here on every call.
+        text = (r.text or "").strip()
+        return text or None
