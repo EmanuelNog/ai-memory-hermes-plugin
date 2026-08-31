@@ -39,7 +39,7 @@ def config() -> AiMemoryConfig:
 @pytest.fixture
 def mock_transport() -> httpx.MockTransport:
     def handler(request: httpx.Request) -> httpx.Response:
-        if "/api/v1/search" in request.url.path:
+        if "/admin/search" in request.url.path:
             return httpx.Response(
                 200,
                 json=[
@@ -56,7 +56,8 @@ def mock_transport() -> httpx.MockTransport:
         if "/hook" in request.url.path:
             return httpx.Response(200, json={"ok": True})
         if "/handoff" in request.url.path:
-            return httpx.Response(200, json={"handoff": {"summary": "test handoff"}})
+            # ai-memory 1.28.1 returns markdown, not a JSON envelope.
+            return httpx.Response(200, text="test handoff")
         return httpx.Response(404)
 
     return httpx.MockTransport(handler)

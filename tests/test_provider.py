@@ -18,7 +18,12 @@ def provider() -> AiMemoryProvider:
         workspace="hermes",
         project="hermes-test",
     )
-    return AiMemoryProvider(config=cfg)
+    p = AiMemoryProvider(config=cfg)
+    # initialize() now fetches a handoff; keep unit tests off the
+    # network (a real ai-memory may well be listening on :49374).
+    p._client = MagicMock()
+    p._client.fetch_handoff.return_value = None
+    return p
 
 
 def test_provider_name(provider: AiMemoryProvider) -> None:
@@ -41,9 +46,10 @@ def test_is_available_without_server_url() -> None:
 
 
 def test_initialize_sets_session_id(provider: AiMemoryProvider) -> None:
-    provider.initialize("session-123", profile="test-profile")
+    provider.initialize("session-123", agent_identity="test-profile")
     assert provider.session_id == "session-123"
-    assert provider._config.project == "hermes-test-profile"
+    # A project configured in ai-memory.json is no longer clobbered.
+    assert provider._config.project == "hermes-test"
 
 
 def test_get_config_schema(provider: AiMemoryProvider) -> None:
@@ -208,12 +214,15 @@ def test_initialize_project_kwarg_overrides_profile(provider: AiMemoryProvider) 
 
 
 def test_initialize_preserves_default_workspace(provider: AiMemoryProvider) -> None:
-    provider.initialize("sess-1", profile="test-profile")
+    provider.initialize("sess-1", agent_identity="test-profile")
     assert provider._config.workspace == "hermes"
 
 
-def test_initialize_uses_profile_when_no_explicit_project(provider: AiMemoryProvider) -> None:
-    provider.initialize("sess-1", profile="custom-profile")
+def test_initialize_uses_identity_when_no_configured_project(
+    provider: AiMemoryProvider,
+) -> None:
+    provider._config.project = ""
+    provider.initialize("sess-1", agent_identity="custom-profile")
     assert provider._config.project == "hermes-custom-profile"
 
 
