@@ -1,4 +1,4 @@
-# install.ps1 — Install ai-memory Hermes plugin on Windows
+﻿# install.ps1 — Install ai-memory Hermes plugin on Windows
 #
 # Works when run:
 #   • locally from a cloned repo (scripts\install.ps1)
