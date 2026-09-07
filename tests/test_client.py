@@ -19,11 +19,12 @@ def client() -> AiMemoryClient:
 
 def test_client_search_success(client: AiMemoryClient) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.method == "POST"
-        assert request.url.path == "/api/v1/search"
+        assert request.method == "GET"
+        assert request.url.path == "/admin/search"
         assert request.headers["Authorization"] == "Bearer test-token"
-        assert json.loads(request.content) == {
+        assert dict(request.url.params) == {
             "q": "test query",
+            "limit": "3",
             "workspace": "hermes",
             "project": "hermes-test",
         }
@@ -115,10 +116,9 @@ def test_client_send_hook_does_not_raise(client: AiMemoryClient) -> None:
 
 
 def test_client_fetch_handoff_returns_summary(client: AiMemoryClient) -> None:
+    # ai-memory 1.28.1 serves the handoff as a markdown block.
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "handoff": {"summary": "Continue working on X"},
-        })
+        return httpx.Response(200, text="  Continue working on X  ")
 
     client._transport = httpx.MockTransport(handler)
     result = client.fetch_handoff()
@@ -150,11 +150,8 @@ def test_client_no_auth_header_when_no_token() -> None:
 
 def test_client_search_passes_workspace_project(client: AiMemoryClient) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert json.loads(request.content) == {
-            "q": "q",
-            "workspace": "custom-ws",
-            "project": "custom-proj",
-        }
+        assert request.url.params["workspace"] == "custom-ws"
+        assert request.url.params["project"] == "custom-proj"
         return httpx.Response(200, json=[])
 
     client._transport = httpx.MockTransport(handler)
@@ -174,7 +171,10 @@ def test_client_search_uses_search_timeout(client: AiMemoryClient) -> None:
     client._request.return_value = _ok_response([])
     client.search("test query")
     client._request.assert_called_once_with(
-        "POST", "/api/v1/search", json={"q": "test query"}, timeout=SEARCH_TIMEOUT
+        "GET",
+        "/admin/search",
+        params={"q": "test query", "limit": 3},
+        timeout=SEARCH_TIMEOUT,
     )
 
 

@@ -38,6 +38,9 @@ class AiMemoryProvider(MemoryProvider):
         self._lock = threading.Lock()
         self.session_id: str = ""
         self._hermes_home: str = ""
+        # Previous-session handoff, fetched once per session in initialize()
+        # and surfaced through system_prompt_block(). None = none pending.
+        self._handoff_context: str | None = None
 
     @property
     def name(self) -> str:
@@ -66,18 +69,45 @@ class AiMemoryProvider(MemoryProvider):
             if auth_token:
                 self._config.auth_token = auth_token
 
-            workspace = kwargs.get("ai_memory_workspace", "")
+            # Workspace precedence: explicit override, then what Hermes
+            # reports, then whatever ai-memory.json already held.
+            # `agent_workspace` is a workspace NAME, not a filesystem path.
+            workspace = kwargs.get("ai_memory_workspace", "") or kwargs.get(
+                "agent_workspace", ""
+            )
             if workspace:
                 self._config.workspace = workspace
 
+            # Project precedence: explicit override, then a project already
+            # configured in ai-memory.json, then a name derived from the
+            # Hermes profile identity.
+            #
+            # Hermes 0.20.5 passes neither `project` nor `profile` - it
+            # passes `agent_identity`. The old code read the missing
+            # `profile` kwarg, so the else branch ran on every session and
+            # clobbered whatever ai-memory.json configured, pinning every
+            # session to "hermes-default".
             project = kwargs.get("project", "")
             if project:
                 self._config.project = project
-            else:
-                profile = kwargs.get("profile", "default")
-                self._config.project = f"hermes-{profile}"
+            elif not self._config.project:
+                identity = kwargs.get("agent_identity", "") or "default"
+                self._config.project = f"hermes-{identity}"
 
             self._client = AiMemoryClient(self._config)
+
+        # One handoff fetch per session, never polled. Loopback server plus
+        # a 2s timeout, so a synchronous call cannot hold up startup, and
+        # any failure leaves the provider working without a handoff.
+        self._handoff_context = None
+        try:
+            self._handoff_context = self._client.fetch_handoff(
+                agent="hermes",
+                workspace=self._config.workspace,
+                project=self._config.project,
+            )
+        except Exception:
+            log.warning("ai-memory handoff fetch failed", exc_info=True)
 
     def get_config_schema(self) -> list[dict[str, Any]]:
         return get_config_schema()
@@ -128,8 +158,16 @@ class AiMemoryProvider(MemoryProvider):
             return json.dumps(self._status())
         raise ValueError(f"Unknown tool: {tool_name}")
 
+    _BASE_PROMPT = "Long-term memory is backed by ai-memory wiki."
+
     def system_prompt_block(self) -> str:
-        return "Long-term memory is backed by ai-memory wiki."
+        if not self._handoff_context:
+            return self._BASE_PROMPT
+        return (
+            self._BASE_PROMPT
+            + "\n\nPrevious session handoff:\n"
+            + self._handoff_context
+        )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         results = self._search({"query": query, "max_results": 3})
@@ -147,8 +185,13 @@ class AiMemoryProvider(MemoryProvider):
 
         def _do() -> None:
             try:
+                # ai-memory's own lifecycle event. The previous
+                # event="user-prompt" with a {user, assistant} body was
+                # accepted with 202 and then stored with an EMPTY body,
+                # because ai-memory reads `prompt` off a
+                # `user-prompt-submit` payload. Every Hermes turn was lost.
                 self._client.send_hook(
-                    event="user-prompt",
+                    event="user-prompt-submit",
                     session_id=sid,
                     payload={
                         # Server wire contract (payload.rs extract_content):
@@ -156,6 +199,9 @@ class AiMemoryProvider(MemoryProvider):
                         # `text` keys. {user, assistant} alone produced EMPTY
                         # observations (body_chars=0) — auto-improve reviewed
                         # content-less sessions and found nothing to propose.
+                        # `session_id` inside the payload is part of the
+                        # upstream ai-memory 1.28 API contract.
+                        "session_id": sid,
                         "prompt": user,
                         "text": assistant,
                         "messages": [
@@ -167,7 +213,7 @@ class AiMemoryProvider(MemoryProvider):
                     project=proj,
                 )
             except Exception:
-                pass
+                log.warning("ai-memory sync_turn failed", exc_info=True)
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -182,6 +228,7 @@ class AiMemoryProvider(MemoryProvider):
                     event="session-end",
                     session_id=sid,
                     payload={
+                        "session_id": sid,
                         "messages": messages,
                         # Server contract keys so the consolidation LLM gets
                         # extractable content, not an empty body.
@@ -196,7 +243,7 @@ class AiMemoryProvider(MemoryProvider):
                     project=proj,
                 )
             except Exception:
-                pass
+                log.warning("ai-memory on_session_end failed", exc_info=True)
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -243,26 +290,6 @@ class AiMemoryProvider(MemoryProvider):
         threading.Thread(target=_do, daemon=True).start()
         return ""
 
-    def on_session_switch(
-        self,
-        new_session_id: str,
-        *,
-        parent_session_id: str = "",
-        reset: bool = False,
-        rewound: bool = False,
-        reason: str = "new_session",
-        **kwargs: Any,
-    ) -> None:
-        """Rebind the provider to the rotated session id.
-
-        Hermes rotates the session_id on context compression, /resume,
-        /branch and /new. Without this hook the provider keeps writing
-        observations to the stale session id after a rotation. A blank
-        new_session_id keeps the current binding (safety default).
-        """
-        if new_session_id:
-            self.session_id = new_session_id
-
     def on_memory_write(
         self, action: str, target: str, content: str, metadata: dict[str, Any] | None = None
     ) -> None:
@@ -278,6 +305,32 @@ class AiMemoryProvider(MemoryProvider):
             except Exception:
                 log.warning("on_memory_write hook failed", exc_info=True)
 
+    def on_session_switch(
+        self,
+        new_session_id: str,
+        *,
+        parent_session_id: str = "",
+        reset: bool = False,
+        rewound: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        """Follow /new, /reset, /resume, /branch and context compression.
+
+        Signature mirrors ``MemoryProvider.on_session_switch``. Hermes swaps
+        session_id on these paths without rebuilding the provider, so without
+        this every later observation kept the id of the session the provider
+        was first initialized with. A blank new_session_id keeps the current
+        binding (safety default); a reset clears the fetched handoff so it
+        cannot leak into the clean context.
+        """
+        with self._lock:
+            if new_session_id:
+                self.session_id = new_session_id
+            if reset:
+                # A reset starts a clean context; the previous session's
+                # handoff must not leak into it.
+                self._handoff_context = None
+
     def shutdown(self) -> None:
         pass
 
@@ -286,12 +339,11 @@ class AiMemoryProvider(MemoryProvider):
         max_results = args.get("max_results", 5)
         if not isinstance(max_results, int) or isinstance(max_results, bool):
             max_results = 5
-        results = self._client.search(
-            query=query,
-            limit=max_results,
-            workspace=self._config.workspace,
-            project=self._config.project,
-        )
+        # Deliberately UNSCOPED: recall searches every project so Hermes
+        # can see what Claude Code and Codex wrote in their own projects.
+        # Writes stay scoped to the Hermes workspace/project; only reads
+        # are global.
+        results = self._client.search(query=query, limit=max_results)
         return {"ok": True, "results": results}
 
     def _write(self, args: dict[str, Any]) -> dict[str, Any]:
