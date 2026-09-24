@@ -120,7 +120,7 @@ class AiMemoryProvider(MemoryProvider):
             {
                 "name": "ai_memory_search",
                 "description": "Search the ai-memory wiki for relevant context",
-                "input_schema": {
+                "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {"type": "string", "description": "Search query"},
@@ -132,7 +132,7 @@ class AiMemoryProvider(MemoryProvider):
             {
                 "name": "ai_memory_write",
                 "description": "Write a new page to the ai-memory wiki",
-                "input_schema": {
+                "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {"type": "string", "description": "Wiki page path"},
@@ -145,7 +145,7 @@ class AiMemoryProvider(MemoryProvider):
             {
                 "name": "ai_memory_status",
                 "description": "Check ai-memory server health",
-                "input_schema": {"type": "object", "properties": {}},
+                "parameters": {"type": "object", "properties": {}},
             },
         ]
 

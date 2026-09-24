@@ -72,6 +72,19 @@ def test_get_tool_schemas(provider: AiMemoryProvider) -> None:
     assert "ai_memory_status" in names
 
 
+def test_tool_schemas_are_openai_shaped(provider: AiMemoryProvider) -> None:
+    """Hermes OpenAI-format requests are rejected by strict providers (opencode-go,
+    DeepSeek) when a function carries `input_schema` (Anthropic shape) instead of
+    `parameters`. The network effect: EVERY model call 400s for the whole session.
+    Regression: 2026-09-24, opencode-go 'missing field `parameters`'."""
+    schemas = provider.get_tool_schemas()
+    assert schemas
+    for s in schemas:
+        assert "parameters" in s, f"{s['name']} uses input_schema instead of parameters"
+        assert "input_schema" not in s, f"{s['name']} must not emit Anthropic input_schema"
+        assert isinstance(s["parameters"], dict) and s["parameters"].get("type") == "object"
+
+
 def test_handle_tool_call_search(provider: AiMemoryProvider) -> None:
     provider._client.search = MagicMock(return_value=[{"path": "test.md"}])
     result = json.loads(provider.handle_tool_call("ai_memory_search", {"query": "test"}))
