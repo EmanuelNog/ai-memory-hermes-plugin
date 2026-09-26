@@ -4,6 +4,14 @@
 
 ### Added
 
+- `.ai-memory.toml` scope resolution — `config.marker_scope()` walks up from the session's `cwd` (stopping at `$HOME` or the filesystem root) and reads `workspace`/`project` with ai-memory's own line-based parser; a marker that pins no scope key is skipped, matching the server's walk-up.
+- `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT` env vars, honoured in `load_config()`, in `register()`, and in the scope precedence. Config reads now go through one shared helper, which also stops a `hermes_home`-less call from reading a cwd-relative `ai-memory.json`.
+- `config.explicit_scope_keys()` — which scope keys the operator set explicitly, so a configured value beats the repository marker.
+- `AiMemoryProvider.recall_status()` — the last `prefetch()`'s hit count, so Hermes can render its recall indicator for ai-memory.
+- `AiMemoryProvider.unavailable_reason()` and `AiMemoryClient.last_failure()` — why the provider cannot serve.
+- Client pause after repeated failures: `FAILURE_THRESHOLD` (3) consecutive transport failures stop calls for `COOLDOWN_SECONDS` (60s) instead of paying a timeout on every turn; a successful request clears it.
+- `SESSION_END_TIMEOUT` (10s) plus optional `cwd` / `timeout` arguments on `AiMemoryClient.send_hook()`.
+
 - `scripts/update.sh` — updates the plugin from GitHub by default; backs up the old install to `$HERMES_HOME/.ai-memory-backups/ai-memory.bak.<timestamp>` (outside the Hermes plugins directory so it is not discovered as a plugin); preserves `ai-memory.json`; supports `UPDATE_FROM_LOCAL=true` and `REPO_TARBALL_URL` overrides.
 - `scripts/update.ps1` — Windows equivalent with the same defaults and backup behavior.
 - `hermes ai-memory update` CLI command — downloads the latest plugin from GitHub, backs up the old install, and replaces the plugin files.
@@ -20,6 +28,16 @@
 
 ### Fixed
 
+- `AiMemoryProvider.queue_prefetch()` now accepts the `session_id` keyword Hermes passes (`MemoryManager.queue_prefetch_all`), so the background recall actually runs and the next turn's `prefetch()` is a cache read. Results are cached per `(session_id, query)` and consumed once.
+- `AiMemoryProvider.on_memory_write()` now mirrors `add` and `replace` — the actions Hermes announces (its `_MIRRORED_MEMORY_ACTIONS`). The old `write`/`append` gate matched nothing, so no built-in `MEMORY.md` / `USER.md` write was ever mirrored; `write`/`append` stay accepted as synonyms for older callers. A `replace` keeps the superseded entry under `## Substituído`, and `remove` is skipped.
+- The tool schemas now use the `parameters` key Hermes normalizes (`MemoryProvider.get_tool_schemas`) instead of `input_schema`, which reached the model as a function with no argument list.
+- `initialize()` no longer lets Hermes's `agent_workspace` literal (`"hermes"`) clobber the scope: the checkout's `.ai-memory.toml` is adopted, so Hermes writes the same ai-memory project the other agents in that repository use. An explicit `workspace`/`project` (kwargs, `ai-memory.json`, or `AI_MEMORY_*` env vars) still wins, and a caller reporting no `cwd` keeps the configured scope.
+- `initialize()` honours `agent_context`: a cron/subagent run neither writes nor consumes the single-use handoff.
+- `on_session_end()` posts the session id instead of the whole transcript (ai-memory reads no body field on `SessionEnd`) and gets `SESSION_END_TIMEOUT` (10s) instead of the 0.5s turn-hook budget, so a slow close no longer loses the session record and its auto handoff.
+- Hooks now carry `cwd`, letting the server resolve the session's scope and publish the active project.
+- `hermes ai-memory status|config|config-set|link|update` no longer raise `AttributeError`: the host's argparse tree never sets `hermes_home`, so the subcommands resolve it themselves (explicit namespace value, else `get_hermes_home()`, else `HERMES_HOME`/`~/.hermes`). `status` also reads the counters from `counts`, where `/admin/status` nests them, instead of printing `?`.
+- `plugin.yaml` declares `python_dependencies` instead of the unknown `pip_dependencies`/`entry_point` keys, and drops the `hooks:` list of ABC method names that no event bus delivers.
+
 - Install/update scripts and `hermes ai-memory update` now detect an empty `$HERMES_HOME/plugins/ai-memory/` directory and re-install instead of treating it as already installed.
 - Install/update scripts and CLI command now verify that `__init__.py` exists after install/update and fail loudly if it is missing.
 - Install/update scripts now warn if the plugin is found at the wrong nested path `$HERMES_HOME/plugins/memory/ai-memory/`.
@@ -31,6 +49,10 @@
 - `scripts/update.sh` and `hermes ai-memory update` now strip secrets from backed-up config files when restoring.
 
 ### Documentation
+
+- Updated `README.md`, `docs/guide.md`, `docs/reference.md`, and `docs/common-problems.md` for the corrected contracts: background prefetch and its per-session cache, the `add`/`replace` mirroring vocabulary, the minimal `session-end` payload, scope resolution through `.ai-memory.toml`, the `hermes ai-memory …` command names and the `counts` shape of `status`, and the client pause.
+- Added a "Scope Resolution" section to `docs/reference.md`.
+
 
 - Updated README, docs/guide.md, docs/reference.md, and docs/common-problems.md to document install/uninstall scripts, fallback behavior, config-removal flags, the `REPO_TARBALL_URL` override variable, env-only secret handling, and pre-flight/dry-run/confirmation features.
 

@@ -12,7 +12,7 @@
 curl http://127.0.0.1:49374/admin/status
 
 # What URL is configured?
-hermes memory config
+hermes ai-memory config
 ```
 
 **Fix:**
@@ -106,7 +106,7 @@ hermes plugins enable ai-memory
 **Check:**
 ```bash
 hermes plugins list | grep ai-memory
-hermes memory config
+hermes memory status
 # → provider should show ai-memory
 cat "$HERMES_HOME/config.yaml" | grep -A2 "memory:"
 ```
@@ -265,9 +265,15 @@ curl "http://127.0.0.1:49374/admin/search?q=test"
 
 ### Memory Not Mirroring
 
-**Cause:** Action is not `"write"` or `"append"` (the only mirrored actions).
+**Cause:** The mirrored actions are `add` and `replace` — what Hermes announces for a built-in `MEMORY.md` / `USER.md` write. `write` and `append` are still accepted as synonyms for older callers.
 
-The plugin checks `action in ("write", "append")` before mirroring. Other memory actions like `"replace"` or `"delete"` are ignored. This is intentional — only new content is mirrored, modifications/deletions are not.
+`remove` is skipped on purpose: the native store owns the deletion, and the mirror keeps the page history instead of writing a tombstone. A `replace` carries the superseded entry in `metadata["previous_content"]` and the page keeps it under `## Substituído`.
+
+### Recall Context Looks Unattributed
+
+**Cause:** Recall spans every project (that is what makes cross-agent recall work), so each injected hit is labelled `<title> (<path>): <snippet>`.
+
+If the hits belong to a project you did not expect, check the resolved scope: a `workspace`/`project` set in `ai-memory.json` or via `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT` wins over the checkout's `.ai-memory.toml`.
 
 ## Testing
 
@@ -290,7 +296,7 @@ export PYTHONWARNINGS=ignore
 
 ## Known Limitations
 
-- **No circuit breaker:** Unlike mem0 plugin, ai-memory does not pause API calls after consecutive failures. The local Rust server is assumed to be reliable.
-- **No durable write queue:** Turn sync is fire-and-forget. If the server is down, the turn is lost. ai-memory server handles its own persistence.
-- **No multi-turn cadence:** Prefetch fires every turn. The local server response is fast enough that cadence control is unnecessary.
+- **Pause instead of a full circuit breaker:** after `FAILURE_THRESHOLD` (3) consecutive transport failures the client stops calling the server for `COOLDOWN_SECONDS` (60s) and reports the reason through `unavailable_reason()`. A successful request clears the state immediately.
+- **No durable write queue:** Turn sync is fire-and-forget. If the server is down, that turn is lost — ai-memory applies its own durable spool for hooks it does receive.
+- **Session end posts no transcript:** ai-memory reads no body field on `session-end`, so the event carries the session id only. Re-close a lost session with `ai-memory finalize-session --agent hermes`.
 - **Single active provider:** Only one Hermes memory provider can be active at a time, selected via `memory.provider` in config.

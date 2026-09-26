@@ -51,10 +51,12 @@ Prompts for server URL, API key (optional), and workspace/project.
 ### 5. Verify
 
 ```bash
-hermes memory status
+hermes ai-memory status
 # → ai-memory server: reachable
-#   Pages:    42
-#   Sessions: 7
+#   Version:      2.4.1
+#   Pages:        42
+#   Sessions:     7
+#   Observations: 318
 ```
 
 ## Configuration
@@ -104,51 +106,57 @@ hermes ai-memory config
 
 ### Project Isolation
 
-Each Hermes profile gets a separate ai-memory project. The project name is derived as `hermes-{profile}`. Override via:
+The provider writes and reads the project the repository declares, so Hermes shares memory with the other agents working in the same checkout. `initialize()` resolves the scope in this order:
 
-```bash
-export AI_MEMORY_PROJECT=my-project
-```
+1. Explicit kwargs — `ai_memory_workspace`, `project`
+2. Explicit config — `workspace` / `project` in `$HERMES_HOME/ai-memory.json`, or `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT`
+3. The nearest `.ai-memory.toml` at or above the session's working directory
+4. What Hermes reports — `agent_workspace`, then `agent_identity` as `hermes-{profile}` (defaults: `hermes` / `hermes-default`)
 
-Or set `project` in `$HERMES_HOME/ai-memory.json`.
+With no repository marker and no explicit config, each profile keeps its own `hermes-{profile}` project, as before.
 
 ## Lifecycle Behavior
 
 ### Session Start (`initialize`)
 
-When a new conversation starts, the provider resolves:
-- `workspace` — from kwargs or config (default: `"hermes"`)
-- `project` — from kwargs, config, or `"hermes-{profile}"` (default: `"hermes-default"`)
+When a new conversation starts, the provider resolves the scope (above) and fetches the previous session's handoff once, so `system_prompt_block()` can surface it. Non-primary contexts (`agent_context` other than `primary`) skip that fetch — accepting a handoff is single-use.
 
 ### Before Each Turn (`prefetch`)
 
-The agent calls `prefetch(query)` with the user's message. The provider:
-1. Searches ai-memory wiki with `GET /admin/search?q=<query>&limit=3`
-2. Returns snippets as a string block
-3. Injected into the model's context before the turn
+The agent calls `prefetch(query, session_id=...)` with the user's message. The provider:
 
-`queue_prefetch(query)` fires the search on a daemon thread for the next turn.
+1. Consumes the cached hits `queue_prefetch` stored for that `(session_id, query)`, if any
+2. Otherwise searches the wiki with `GET /admin/search?q=<query>&limit=3`
+3. Returns one block per hit, labelled `title (path): snippet` — recall spans every project, so the block names where each fact came from
+
+`queue_prefetch(query, session_id=...)` runs the search on a daemon thread right after a turn, which is what makes the next turn's `prefetch` a cache read.
 
 ### After Each Turn (`sync_turn`)
 
 After each user+assistant exchange:
+
 1. Spawns a daemon thread
-2. Sends `POST /hook?event=user-prompt` with the turn payload
+2. Sends `POST /hook?event=user-prompt-submit` with `{"session_id", "prompt"}` — the field ai-memory reads — plus the session's `cwd`
 3. Swallows errors (logged only)
 
 ### Session End (`on_session_end`)
 
 When the conversation ends:
+
 1. Spawns a daemon thread
-2. Sends `POST /hook?event=session-end` with all messages
+2. Sends `POST /hook?event=session-end` with the session id only — the server reads no body field on this event, and posting the transcript risked the 0.5s turn-hook timeout dropping the close
 3. Swallows errors (logged only)
+
+If a close is ever lost (server down at that moment), `ai-memory finalize-session --agent hermes` posts the same event afterwards.
 
 ### Memory Mirroring (`on_memory_write`)
 
 When Hermes writes to built-in `MEMORY.md` or `USER.md`:
-1. Mirrors content to ai-memory wiki via `POST /admin/write-page`
+
+1. Mirrors the write to the ai-memory wiki via `POST /admin/write-page`
 2. Path: `hermes-memory/{target}.md`
 3. Tags: `hermes`, `mirror`
+4. `add` and `replace` are mirrored — a `replace` keeps the superseded entry in the page under `## Substituído`. `remove` is skipped: the wiki keeps the page history rather than a tombstone.
 
 ## Using Tools
 
