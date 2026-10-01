@@ -7,8 +7,10 @@ import pytest
 from config import (
     AiMemoryConfig,
     _secret_keys,
+    explicit_scope_keys,
     get_config_schema,
     load_config,
+    marker_scope,
     save_config,
 )
 
@@ -67,12 +69,16 @@ def test_load_config_from_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.delenv("AI_MEMORY_AUTH_TOKEN", raising=False)
     p = tmp_path / "ai-memory.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
-        "server_url": "http://file:49374",
-        "auth_token": "file-token",
-        "workspace": "file-ws",
-        "project": "file-proj",
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "server_url": "http://file:49374",
+                "auth_token": "file-token",
+                "workspace": "file-ws",
+                "project": "file-proj",
+            }
+        )
+    )
     cfg = load_config(str(tmp_path))
     assert cfg.server_url == "http://file:49374"
     assert cfg.auth_token == "file-token"
@@ -120,9 +126,7 @@ def test_config_roundtrip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert cfg.project == "roundtrip-proj"
 
 
-def test_load_config_corrupt_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_load_config_corrupt_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AI_MEMORY_SERVER_URL", raising=False)
     monkeypatch.delenv("AI_MEMORY_AUTH_TOKEN", raising=False)
     p = tmp_path / "ai-memory.json"
@@ -136,10 +140,14 @@ def test_load_config_corrupt_json(
 def test_load_config_env_overrides_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "ai-memory.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
-        "server_url": "http://file:49374",
-        "auth_token": "file-token",
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "server_url": "http://file:49374",
+                "auth_token": "file-token",
+            }
+        )
+    )
     monkeypatch.setenv("AI_MEMORY_SERVER_URL", "http://env:49374")
     monkeypatch.setenv("AI_MEMORY_AUTH_TOKEN", "env-token")
     cfg = load_config(str(tmp_path))
@@ -152,11 +160,15 @@ def test_load_config_filters_extra_keys(tmp_path: Path, monkeypatch: pytest.Monk
     monkeypatch.delenv("AI_MEMORY_AUTH_TOKEN", raising=False)
     p = tmp_path / "ai-memory.json"
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps({
-        "server_url": "http://extra:49374",
-        "auth_token": "extra-token",
-        "unknown_key": "should be ignored",
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "server_url": "http://extra:49374",
+                "auth_token": "extra-token",
+                "unknown_key": "should be ignored",
+            }
+        )
+    )
     cfg = load_config(str(tmp_path))
     assert cfg.server_url == "http://extra:49374"
     assert not hasattr(cfg, "unknown_key")
@@ -177,11 +189,15 @@ def test_save_config_does_not_write_secrets_to_disk(tmp_path: Path) -> None:
 
 def test_save_config_strips_existing_secrets_from_file(tmp_path: Path) -> None:
     p = tmp_path / "ai-memory.json"
-    p.write_text(json.dumps({
-        "server_url": "http://old:49374",
-        "auth_token": "old-secret",
-        "api_key": "old-key",
-    }))
+    p.write_text(
+        json.dumps(
+            {
+                "server_url": "http://old:49374",
+                "auth_token": "old-secret",
+                "api_key": "old-key",
+            }
+        )
+    )
     save_config({"server_url": "http://new:49374"}, str(tmp_path))
     data = json.loads(p.read_text())
     assert data["server_url"] == "http://new:49374"
@@ -212,3 +228,54 @@ def test_get_config_schema_has_env_only() -> None:
             assert item.get("secret") is True
             assert item.get("env_only") is True
             assert "env_var" in item
+
+
+def test_load_config_reads_scope_from_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_MEMORY_WORKSPACE", "env-ws")
+    monkeypatch.setenv("AI_MEMORY_PROJECT", "env-proj")
+    cfg = load_config(str(tmp_path))
+    assert cfg.workspace == "env-ws"
+    assert cfg.project == "env-proj"
+
+
+def test_explicit_scope_keys_reports_only_operator_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("AI_MEMORY_WORKSPACE", raising=False)
+    monkeypatch.delenv("AI_MEMORY_PROJECT", raising=False)
+    assert explicit_scope_keys(str(tmp_path)) == set()
+
+    (tmp_path / "ai-memory.json").write_text(json.dumps({"project": "custom-project"}))
+    assert explicit_scope_keys(str(tmp_path)) == {"project"}
+
+    monkeypatch.setenv("AI_MEMORY_WORKSPACE", "env-ws")
+    assert explicit_scope_keys(str(tmp_path)) == {"workspace", "project"}
+
+
+def test_marker_scope_reads_the_nearest_scope_marker(tmp_path: Path) -> None:
+    (tmp_path / ".ai-memory.toml").write_text('workspace = "default"\nproject = "Caminhar"\n')
+    nested = tmp_path / "app" / "src"
+    nested.mkdir(parents=True)
+    assert marker_scope(str(nested)) == {"workspace": "default", "project": "Caminhar"}
+
+
+def test_marker_scope_skips_a_capture_only_marker(tmp_path: Path) -> None:
+    """A marker with no scope key keeps the walk-up going, like the server's."""
+    (tmp_path / ".ai-memory.toml").write_text('project = "repo-project"\n')
+    nested = tmp_path / "src"
+    nested.mkdir()
+    (nested / ".ai-memory.toml").write_text("[capture]\nhook_capture = false\n")
+    assert marker_scope(str(nested)) == {"project": "repo-project"}
+
+
+def test_marker_scope_ignores_single_quoted_values(tmp_path: Path) -> None:
+    """ai-memory's reader accepts only double-quoted strings; so does ours."""
+    (tmp_path / ".ai-memory.toml").write_text(
+        "workspace = 'acme'\nproject = \"infra\"  # trailing comment\n"
+    )
+    assert marker_scope(str(tmp_path)) == {"project": "infra"}
+
+
+def test_marker_scope_is_empty_without_cwd_or_marker(tmp_path: Path) -> None:
+    assert marker_scope("") == {}
+    assert marker_scope(str(tmp_path)) == {}

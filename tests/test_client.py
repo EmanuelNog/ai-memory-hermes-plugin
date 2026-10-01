@@ -5,16 +5,24 @@ from unittest.mock import ANY, MagicMock
 
 import httpx
 import pytest
-from client import HOOK_TIMEOUT, SEARCH_TIMEOUT, AiMemoryClient
+from client import (
+    FAILURE_THRESHOLD,
+    HOOK_TIMEOUT,
+    SEARCH_TIMEOUT,
+    SESSION_END_TIMEOUT,
+    AiMemoryClient,
+)
 from config import AiMemoryConfig
 
 
 @pytest.fixture
 def client() -> AiMemoryClient:
-    return AiMemoryClient(AiMemoryConfig(
-        server_url="http://localhost:49374",
-        auth_token="test-token",
-    ))
+    return AiMemoryClient(
+        AiMemoryConfig(
+            server_url="http://localhost:49374",
+            auth_token="test-token",
+        )
+    )
 
 
 def test_client_search_success(client: AiMemoryClient) -> None:
@@ -198,9 +206,12 @@ def test_client_search_handles_non_dict_response(client: AiMemoryClient) -> None
 
 def test_client_search_normalizes_legacy_envelope_and_applies_limit(client: AiMemoryClient) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={
-            "results": [{"path": "first.md"}, "invalid", {"path": "second.md"}],
-        })
+        return httpx.Response(
+            200,
+            json={
+                "results": [{"path": "first.md"}, "invalid", {"path": "second.md"}],
+            },
+        )
 
     client._transport = httpx.MockTransport(handler)
     assert client.search("test query", limit=1) == [{"path": "first.md"}]
@@ -214,7 +225,76 @@ def test_client_write_page_with_tier_and_pinned(client: AiMemoryClient) -> None:
         return httpx.Response(200, json={"ok": True})
 
     client._transport = httpx.MockTransport(handler)
-    result = client.write_page(
-        "notes/test.md", "# Hello", tier="semantic", pinned=True
-    )
+    result = client.write_page("notes/test.md", "# Hello", tier="semantic", pinned=True)
     assert result["ok"] is True
+
+
+def test_client_send_hook_passes_cwd(client: AiMemoryClient) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client._transport = httpx.MockTransport(handler)
+    client.send_hook("user-prompt-submit", "test-session", cwd="/repo/app")
+    assert seen[0].url.params["cwd"] == "/repo/app"
+
+
+def test_client_send_hook_timeout_override(client: AiMemoryClient) -> None:
+    client._request = MagicMock()
+    client._request.return_value = _ok_response({"ok": True})
+    client.send_hook("session-end", "test-session", timeout=SESSION_END_TIMEOUT)
+    assert client._request.call_args.kwargs["timeout"] == SESSION_END_TIMEOUT
+
+
+def test_client_pauses_after_repeated_transport_failures(client: AiMemoryClient) -> None:
+    """A server that is down must not cost a timeout on every single turn."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client._transport = httpx.MockTransport(handler)
+    for _ in range(FAILURE_THRESHOLD):
+        with pytest.raises(httpx.ConnectError):
+            client.status()
+
+    assert "ConnectError" in client.last_failure()
+    with pytest.raises(RuntimeError, match="paused"):
+        client.status()
+
+
+def test_client_clears_failure_state_after_a_successful_request(
+    client: AiMemoryClient,
+) -> None:
+    def failing(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client._transport = httpx.MockTransport(failing)
+    with pytest.raises(httpx.ConnectError):
+        client.status()
+
+    client._transport = httpx.MockTransport(lambda request: httpx.Response(200, json={"ok": True}))
+    client.status()
+    assert client.last_failure() == ""
+
+
+def test_client_send_hook_is_dropped_while_paused(client: AiMemoryClient) -> None:
+    """While paused, a hook is dropped instead of paying the timeout again."""
+
+    def failing(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    client._transport = httpx.MockTransport(failing)
+    for _ in range(FAILURE_THRESHOLD):
+        client.send_hook("user-prompt-submit", "test-session")
+
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    client._transport = httpx.MockTransport(handler)
+    client.send_hook("user-prompt-submit", "test-session")
+    assert calls == []

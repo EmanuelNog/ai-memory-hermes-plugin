@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,14 @@ WRITE_TIMEOUT = 10.0
 # Handoff is fetched once, synchronously, on session start against a
 # loopback server. Keep it short so a stalled server cannot delay startup.
 HANDOFF_TIMEOUT = 2.0
+# Session end carries no transcript (ai-memory stores only the lifecycle row),
+# so it gets the write budget instead of the 0.5s turn-hook budget.
+SESSION_END_TIMEOUT = 10.0
+# A local server that is down fails every call immediately; after this many
+# consecutive transport failures the client pauses instead of paying a timeout
+# on every turn. ``last_failure()`` explains the pause.
+FAILURE_THRESHOLD = 3
+COOLDOWN_SECONDS = 60.0
 
 
 class AiMemoryClient:
@@ -35,16 +44,62 @@ class AiMemoryClient:
             headers["Authorization"] = f"Bearer {token}"
         self._transport: Any = None
         self._client = httpx.Client(headers=headers)
+        self._consecutive_failures = 0
+        self._blocked_until = 0.0
+        self._last_failure = ""
+
+    def last_failure(self) -> str:
+        """Transport failure pausing this client, or ``""`` while it is healthy."""
+        return self._last_failure if self._is_blocked() else ""
+
+    def _is_blocked(self) -> bool:
+        """Whether the pause window is still open; expires into a fresh attempt."""
+        if not self._blocked_until:
+            return False
+        if time.monotonic() >= self._blocked_until:
+            self._blocked_until = 0.0
+            self._consecutive_failures = 0
+            self._last_failure = ""
+            return False
+        return True
+
+    def _record_failure(self, exc: Exception) -> None:
+        self._consecutive_failures += 1
+        self._last_failure = f"{type(exc).__name__}: {exc}"
+        if self._consecutive_failures >= FAILURE_THRESHOLD:
+            self._blocked_until = time.monotonic() + COOLDOWN_SECONDS
+            log.warning(
+                "ai-memory unreachable (%d consecutive failures, %s); pausing requests for %.0fs",
+                self._consecutive_failures,
+                self._last_failure,
+                COOLDOWN_SECONDS,
+            )
+
+    def _record_success(self) -> None:
+        self._consecutive_failures = 0
+        self._blocked_until = 0.0
+        self._last_failure = ""
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        if self._is_blocked():
+            raise RuntimeError(f"ai-memory requests paused: {self._last_failure}")
         url = f"{self._base}{path}"
         extra_headers = kwargs.pop("headers", {})
         headers = {**self._client.headers, **extra_headers}
         timeout = kwargs.pop("timeout", SEARCH_TIMEOUT)
-        if self._transport:
-            with httpx.Client(transport=self._transport, timeout=timeout) as c:
-                return c.request(method, url, headers=headers, **kwargs)
-        return self._client.request(method, url, headers=headers, timeout=timeout, **kwargs)
+        try:
+            if self._transport:
+                with httpx.Client(transport=self._transport, timeout=timeout) as c:
+                    response = c.request(method, url, headers=headers, **kwargs)
+            else:
+                response = self._client.request(
+                    method, url, headers=headers, timeout=timeout, **kwargs
+                )
+        except Exception as exc:
+            self._record_failure(exc)
+            raise
+        self._record_success()
+        return response
 
     def search(
         self,
@@ -115,7 +170,12 @@ class AiMemoryClient:
         payload: dict[str, Any] | None = None,
         workspace: str | None = None,
         project: str | None = None,
+        cwd: str | None = None,
+        timeout: float | None = None,
     ) -> None:
+        if self._is_blocked():
+            log.debug("ai-memory hook skipped for event=%s: %s", event, self._last_failure)
+            return
         params: dict[str, str] = {
             "event": event,
             "agent": "hermes",
@@ -124,13 +184,19 @@ class AiMemoryClient:
             params["workspace"] = workspace
         if project:
             params["project"] = project
+        # cwd travels with the event so the server can resolve the same scope a
+        # shell-hook-driven agent would, and refresh the active project.
+        if cwd:
+            params["cwd"] = cwd
         if session_id:
             params["session_id"] = session_id
         body: dict[str, Any] = {}
         if payload:
             body = payload
         try:
-            r = self._request("POST", "/hook", params=params, json=body, timeout=HOOK_TIMEOUT)
+            r = self._request(
+                "POST", "/hook", params=params, json=body, timeout=timeout or HOOK_TIMEOUT
+            )
             # ai-memory answers 202 for anything it queues, including a
             # payload whose fields it does not recognise, so a bad shape
             # used to look identical to a good one. raise_for_status at
