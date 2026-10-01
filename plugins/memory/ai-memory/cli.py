@@ -20,7 +20,28 @@ from client import AiMemoryClient  # noqa: E402
 from config import _secret_keys, load_config, save_config  # noqa: E402
 
 PLUGIN_DIR = Path(__file__).resolve().parent
-REPO_TARBALL_URL = "https://github.com/MrLuciano/ai-memory-hermes-plugin/archive/refs/heads/main.zip"
+REPO_TARBALL_URL = (
+    "https://github.com/MrLuciano/ai-memory-hermes-plugin/archive/refs/heads/main.zip"
+)
+
+
+def _hermes_home(args: argparse.Namespace) -> str:
+    """Hermes home for this invocation.
+
+    The host's argparse tree does not set ``hermes_home`` on the namespace (the
+    bundled plugins call ``get_hermes_home()`` instead), so the subcommands used
+    to fail with an AttributeError; a namespace that does carry one — a caller
+    or a test passing it explicitly — still wins.
+    """
+    explicit = getattr(args, "hermes_home", "")
+    if explicit:
+        return str(explicit)
+    try:
+        from hermes_constants import get_hermes_home
+
+        return str(get_hermes_home())
+    except ImportError:
+        return os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
 
 def register_cli(subparsers: argparse._SubParsersAction) -> None:
@@ -43,19 +64,23 @@ def register_cli(subparsers: argparse._SubParsersAction) -> None:
 
 
 def cmd_status(args: argparse.Namespace) -> None:
-    config = load_config(args.hermes_home)
+    config = load_config(_hermes_home(args))
     client = AiMemoryClient(config)
     try:
         result = client.status()
+        # /admin/status nests the lifetime counters under `counts`.
+        counts = result.get("counts", {})
         print("ai-memory server: reachable")
-        print(f"  Pages:    {result.get('pages', '?')}")
-        print(f"  Sessions: {result.get('sessions', '?')}")
+        print(f"  Version:      {result.get('version', '?')}")
+        print(f"  Pages:        {counts.get('pages_latest', '?')}")
+        print(f"  Sessions:     {counts.get('sessions', '?')}")
+        print(f"  Observations: {counts.get('observations', '?')}")
     except Exception as e:
         print(f"ai-memory server: unreachable ({e})")
 
 
 def cmd_config(args: argparse.Namespace) -> None:
-    config = load_config(args.hermes_home)
+    config = load_config(_hermes_home(args))
     secrets = _secret_keys()
     print("ai-memory configuration:")
     print(f"  server_url: {config.server_url}")
@@ -84,15 +109,16 @@ def cmd_config_set(args: argparse.Namespace) -> None:
         print("Add it to your shell profile or systemd environment for persistence.")
         return
 
-    skipped = save_config({key: value}, args.hermes_home)
+    hermes_home = _hermes_home(args)
+    skipped = save_config({key: value}, hermes_home)
     if skipped:
         for s in skipped:
             print(f"  skipped: {s} (use env var)")
-    print(f"  saved: {key} -> {Path(args.hermes_home) / 'ai-memory.json'}")
+    print(f"  saved: {key} -> {Path(hermes_home) / 'ai-memory.json'}")
 
 
 def cmd_link(args: argparse.Namespace) -> None:
-    target_dir = Path(args.hermes_home) / "plugins" / "ai-memory"
+    target_dir = Path(_hermes_home(args)) / "plugins" / "ai-memory"
     target_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if target_dir.exists():
@@ -112,7 +138,7 @@ def cmd_link(args: argparse.Namespace) -> None:
 
 
 def cmd_update(args: argparse.Namespace) -> None:
-    hermes_home = Path(args.hermes_home)
+    hermes_home = Path(_hermes_home(args))
     plugin_dir = hermes_home / "plugins" / "ai-memory"
     config_file = hermes_home / "ai-memory.json"
     backup_root = hermes_home / ".ai-memory-backups"
@@ -193,6 +219,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     if backup_config.exists() and not config_file.exists():
         try:
             import json as _json
+
             old_cfg = _json.loads(backup_config.read_text())
             for secret_key in _secret_keys():
                 old_cfg.pop(secret_key, None)

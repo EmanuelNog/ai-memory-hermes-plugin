@@ -8,11 +8,14 @@ sends.
 
 from __future__ import annotations
 
+import json
+import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from client import AiMemoryClient
+from client import SESSION_END_TIMEOUT, AiMemoryClient
 from config import AiMemoryConfig
 from provider import AiMemoryProvider
 
@@ -143,9 +146,7 @@ def test_search_empty_results(cfg: AiMemoryConfig) -> None:
 
 def test_search_honours_limit(cfg: AiMemoryConfig) -> None:
     client = AiMemoryClient(cfg)
-    seen = _capture(
-        client, httpx.Response(200, json=[{"path": f"{i}.md"} for i in range(10)])
-    )
+    seen = _capture(client, httpx.Response(200, json=[{"path": f"{i}.md"} for i in range(10)]))
     results = client.search("q", limit=2)
     assert dict(seen[0].url.params)["limit"] == "2"
     assert len(results) == 2
@@ -310,3 +311,109 @@ def test_on_session_end_survives_client_failure(offline_provider: AiMemoryProvid
     offline_provider._client.send_hook.side_effect = RuntimeError("network gone")
     offline_provider.initialize("sess-1", hermes_home="")
     offline_provider.on_session_end([{"role": "user", "content": "hi"}])  # must not raise
+
+
+# ------------------------------------------- 12. non-primary contexts (writes)
+def test_non_primary_context_skips_writes_and_handoff(
+    offline_provider: AiMemoryProvider,
+) -> None:
+    """A cron/subagent provider must not write — and must not take the handoff.
+
+    The handoff fetch is destructive (the server marks it accepted), so a
+    subagent that initialized the provider used to eat the baton meant for the
+    session the user was watching.
+    """
+    offline_provider.initialize("sess-sub", hermes_home="", agent_context="subagent")
+    offline_provider._client.fetch_handoff.assert_not_called()
+
+    offline_provider.on_memory_write("add", "memory", "# entry")
+    offline_provider.sync_turn("prompt", "answer", session_id="sess-sub")
+    offline_provider.on_session_end([{"role": "user", "content": "hi"}])
+    time.sleep(0.05)
+
+    offline_provider._client.send_hook.assert_not_called()
+    offline_provider._client.write_page.assert_not_called()
+
+
+def test_primary_context_still_fetches_the_handoff(
+    offline_provider: AiMemoryProvider,
+) -> None:
+    offline_provider.initialize("sess-1", hermes_home="", agent_context="primary")
+    offline_provider._client.fetch_handoff.assert_called_once()
+
+
+# --------------------------------------------- 13. session-end payload budget
+def test_session_end_posts_contract_payload_and_uses_the_write_timeout(
+    offline_provider: AiMemoryProvider,
+) -> None:
+    """Fork contract: session-end carries the server-contract payload.
+
+    The fork (930165b) posts prompt/text keys so the consolidation LLM gets
+    extractable content, not an empty body; the event still closes the
+    session and gets the write timeout instead of the 0.5s turn-hook budget.
+    """
+    offline_provider.initialize("sess-1", hermes_home="")
+    offline_provider.on_session_end([{"role": "user", "content": "x" * 5000}])
+    _wait_for_hook(offline_provider)
+
+    kwargs = offline_provider._client.send_hook.call_args.kwargs
+    assert kwargs["event"] == "session-end"
+    payload = kwargs["payload"]
+    assert payload["session_id"] == "sess-1"
+    assert "prompt" in payload and "text" in payload
+    assert kwargs["timeout"] == SESSION_END_TIMEOUT
+
+
+def test_turn_hook_carries_cwd(offline_provider: AiMemoryProvider) -> None:
+    """cwd lets the server resolve the session's scope and active project."""
+    offline_provider.initialize("sess-1", hermes_home="", cwd="/repo/app")
+    offline_provider.sync_turn("prompt", "answer", session_id="sess-1")
+    _wait_for_hook(offline_provider)
+    assert offline_provider._client.send_hook.call_args.kwargs["cwd"] == "/repo/app"
+
+
+# -------------------------------------------------------------- 14. marker scope
+def test_marker_scope_beats_the_hermes_workspace_literal(
+    tmp_path: Path, offline_provider: AiMemoryProvider
+) -> None:
+    """`agent_workspace` is the literal "hermes".
+
+    Letting it win pinned every session to a project that no other agent in the
+    same repository writes to, which is what broke cross-agent handoff.
+    """
+    (tmp_path / ".ai-memory.toml").write_text('workspace = "default"\nproject = "Caminhar"\n')
+    checkout = tmp_path / "app"
+    checkout.mkdir()
+
+    offline_provider.initialize(
+        "sess-1",
+        hermes_home="",
+        cwd=str(checkout),
+        agent_workspace="hermes",
+        agent_identity="default",
+    )
+    assert offline_provider._config.workspace == "default"
+    assert offline_provider._config.project == "Caminhar"
+
+
+def test_explicit_config_beats_the_marker_per_key(
+    tmp_path: Path, offline_provider: AiMemoryProvider
+) -> None:
+    hermes_home = tmp_path / "home"
+    hermes_home.mkdir()
+    (hermes_home / "ai-memory.json").write_text(json.dumps({"project": "pinned-project"}))
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+    (checkout / ".ai-memory.toml").write_text('workspace = "ws"\nproject = "from-marker"\n')
+
+    offline_provider.initialize("sess-1", hermes_home=str(hermes_home), cwd=str(checkout))
+    assert offline_provider._config.project == "pinned-project"
+    # workspace was not configured explicitly, so the marker still supplies it.
+    assert offline_provider._config.workspace == "ws"
+
+
+def test_marker_is_ignored_without_a_cwd(offline_provider: AiMemoryProvider) -> None:
+    """A caller reporting no working directory keeps the configured scope."""
+    offline_provider.initialize("sess-1", hermes_home="", agent_workspace="hermes")
+    assert offline_provider._config.workspace == "hermes"
+    assert offline_provider._config.project == "hermes-test"

@@ -43,18 +43,29 @@ def test_register_passes_ai_memory_provider_instance() -> None:
     assert isinstance(args[0], AiMemoryProvider)
 
 
-def test_plugin_yaml_has_httpx_dependency() -> None:
+def test_plugin_yaml_declares_python_dependency() -> None:
+    # Hermes validates `python_dependencies`; `pip_dependencies` is an unknown
+    # manifest key (warned and ignored), so the dependency has to be declared
+    # under the spelling the loader knows.
     with open(PLUGIN_YAML) as f:
         data = yaml.safe_load(f)
-    deps = data.get("pip_dependencies", [])
-    assert "httpx" in deps
+    assert "httpx" in data.get("python_dependencies", [])
+    assert "pip_dependencies" not in data
+    assert "entry_point" not in data
 
 
-def test_plugin_yaml_has_on_session_end_hook() -> None:
+def test_plugin_yaml_is_exclusive_with_hook_declarations() -> None:
+    # A memory provider is selected by name (`memory.provider`); the fork
+    # keeps the hooks declaration so the PreCompact chain (on_pre_compress /
+    # on_session_switch) and sync_turn are advertised to the Hermes loader.
     with open(PLUGIN_YAML) as f:
         data = yaml.safe_load(f)
+    assert data.get("kind") == "exclusive"
     hooks = data.get("hooks", [])
     assert "on_session_end" in hooks
+    assert "on_pre_compress" in hooks
+    assert "on_session_switch" in hooks
+    assert "sync_turn" in hooks
 
 
 def test_registered_provider_has_config_schema() -> None:

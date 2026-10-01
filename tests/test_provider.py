@@ -100,20 +100,24 @@ def test_search_defaults_invalid_max_results(provider: AiMemoryProvider) -> None
 
 def test_handle_tool_call_write(provider: AiMemoryProvider) -> None:
     provider._client.write_page = MagicMock(return_value={"ok": True})
-    result = json.loads(provider.handle_tool_call(
-        "ai_memory_write",
-        {"path": "notes/test.md", "body": "# Hello"},
-    ))
+    result = json.loads(
+        provider.handle_tool_call(
+            "ai_memory_write",
+            {"path": "notes/test.md", "body": "# Hello"},
+        )
+    )
     assert result["ok"] is True
     assert result["written"] == "notes/test.md"
 
 
 def test_handle_tool_call_write_accepts_current_api_page_id(provider: AiMemoryProvider) -> None:
     provider._client.write_page = MagicMock(return_value={"page_id": "page-123"})
-    result = json.loads(provider.handle_tool_call(
-        "ai_memory_write",
-        {"path": "notes/test.md", "body": "# Hello"},
-    ))
+    result = json.loads(
+        provider.handle_tool_call(
+            "ai_memory_write",
+            {"path": "notes/test.md", "body": "# Hello"},
+        )
+    )
     assert result == {"ok": True, "written": "notes/test.md"}
 
 
@@ -142,13 +146,15 @@ def test_system_prompt_block(provider: AiMemoryProvider) -> None:
 
 
 def test_prefetch_returns_context(provider: AiMemoryProvider) -> None:
-    provider._search = MagicMock(return_value={
-        "ok": True,
-        "results": [
-            {"snippet": "context 1"},
-            {"snippet": "context 2"},
-        ],
-    })
+    provider._search = MagicMock(
+        return_value={
+            "ok": True,
+            "results": [
+                {"snippet": "context 1"},
+                {"snippet": "context 2"},
+            ],
+        }
+    )
     result = provider.prefetch("test query")
     assert result is not None
     assert "context 1" in result
@@ -238,11 +244,114 @@ def test_on_memory_write_skips_other_actions(provider: AiMemoryProvider) -> None
     provider._client.write_page.assert_not_called()
 
 
-def test_queue_prefetch(provider: AiMemoryProvider) -> None:
-    provider.prefetch = MagicMock()
-    provider.queue_prefetch("test query")
+def test_queue_prefetch_fills_the_next_prefetch(provider: AiMemoryProvider) -> None:
+    """Hermes calls ``queue_prefetch(query, session_id=...)`` after each turn.
+
+    Regression: the old signature took only ``query``, so the manager's
+    keyword call raised TypeError, the error was swallowed as "non-fatal", and
+    the background recall never ran.
+    """
+    provider._client.search = MagicMock(
+        return_value=[{"path": "concepts/x.md", "title": "X", "snippet": "cached body"}]
+    )
+    provider.queue_prefetch("test query", session_id="sess-9")
     time.sleep(0.05)
-    provider.prefetch.assert_called_once_with("test query")
+    provider._client.search.assert_called_once_with(query="test query", limit=3)
+
+    provider._search = MagicMock(side_effect=AssertionError("cache miss"))
+    result = provider.prefetch("test query", session_id="sess-9")
+    assert "cached body" in result
+    provider._search.assert_not_called()
+
+
+def test_prefetch_is_not_shared_between_sessions(provider: AiMemoryProvider) -> None:
+    """Results are cached per ``(session_id, query)``, never across sessions."""
+    provider._client.search = MagicMock(return_value=[{"snippet": "sess-9 body"}])
+    provider.queue_prefetch("same query", session_id="sess-9")
+    time.sleep(0.05)
+    provider._search = MagicMock(return_value={"ok": True, "results": [{"snippet": "sess-1 body"}]})
+    assert "sess-1 body" in provider.prefetch("same query", session_id="sess-1")
+    provider._search.assert_called_once()
+
+
+def test_prefetch_labels_hits_with_path_and_title(provider: AiMemoryProvider) -> None:
+    """Recall is global, so each injected hit names the page it came from."""
+    provider._search = MagicMock(
+        return_value={
+            "ok": True,
+            "results": [{"path": "conceitos/x.md", "title": "X", "snippet": "corpo"}],
+        }
+    )
+    result = provider.prefetch("test query")
+    assert "X (conceitos/x.md)" in result
+    assert "corpo" in result
+
+
+def test_recall_status_reflects_last_prefetch(provider: AiMemoryProvider) -> None:
+    provider._search = MagicMock(
+        return_value={"ok": True, "results": [{"snippet": "a"}, {"snippet": "b"}]}
+    )
+    provider.prefetch("test query")
+    status = provider.recall_status()
+    assert status is not None
+    assert status.provider_label == "ai-memory"
+    assert status.count == 2
+
+    provider._search = MagicMock(return_value={"ok": True, "results": []})
+    provider.prefetch("test query")
+    assert provider.recall_status() is None
+
+
+def test_tool_schemas_use_parameters_key(provider: AiMemoryProvider) -> None:
+    """Hermes normalizes ``parameters``; an ``input_schema`` schema reaches the
+    request with no argument list at all."""
+    schemas = provider.get_tool_schemas()
+    assert schemas
+    for schema in schemas:
+        assert "parameters" in schema, schema["name"]
+        assert "input_schema" not in schema
+
+
+def test_search_schema_declares_its_required_argument(provider: AiMemoryProvider) -> None:
+    schema = next(s for s in provider.get_tool_schemas() if s["name"] == "ai_memory_search")
+    assert schema["parameters"]["required"] == ["query"]
+    assert "query" in schema["parameters"]["properties"]
+
+
+def test_on_memory_write_mirrors_add(provider: AiMemoryProvider) -> None:
+    """Hermes announces built-in writes as add|replace|remove."""
+    provider._client.write_page = MagicMock()
+    provider.on_memory_write("add", "memory", "# entry")
+    kwargs = provider._client.write_page.call_args.kwargs
+    assert kwargs["path"] == "hermes-memory/memory.md"
+    assert kwargs["body"] == "# entry"
+    assert kwargs["tags"] == ["hermes", "mirror"]
+
+
+def test_on_memory_write_replace_keeps_previous_content(provider: AiMemoryProvider) -> None:
+    provider._client.write_page = MagicMock()
+    provider.on_memory_write("replace", "user", "# novo", metadata={"previous_content": "# antigo"})
+    assert provider._client.write_page.call_args.kwargs["path"] == "hermes-memory/user.md"
+    body = provider._client.write_page.call_args.kwargs["body"]
+    assert "# novo" in body
+    assert "# antigo" in body
+
+
+def test_on_memory_write_skips_remove(provider: AiMemoryProvider) -> None:
+    """The mirror keeps page history; a delete gets no tombstone."""
+    provider._client.write_page = MagicMock()
+    provider.on_memory_write("remove", "memory", "# entry", metadata={"old_text": "# entry"})
+    provider._client.write_page.assert_not_called()
+
+
+def test_unavailable_reason_when_server_url_missing() -> None:
+    p = AiMemoryProvider(config=AiMemoryConfig(server_url=""))
+    assert "AI_MEMORY_SERVER_URL" in p.unavailable_reason()
+
+
+def test_unavailable_reason_is_empty_when_healthy() -> None:
+    p = AiMemoryProvider(config=AiMemoryConfig())
+    assert p.unavailable_reason() == ""
 
 
 def test_initialize_resolves_workspace_from_kwargs(provider: AiMemoryProvider) -> None:

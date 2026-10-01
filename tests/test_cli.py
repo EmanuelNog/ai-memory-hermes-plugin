@@ -92,14 +92,10 @@ def test_cmd_config_shows_env_source(
     assert "set via env: AI_MEMORY_AUTH_TOKEN" in captured.out
 
 
-def test_cmd_config_set_rejects_secrets(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
+def test_cmd_config_set_rejects_secrets(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     from cli import cmd_config_set
 
-    args = argparse.Namespace(
-        hermes_home=str(tmp_path), key="auth_token", value="secret123"
-    )
+    args = argparse.Namespace(hermes_home=str(tmp_path), key="auth_token", value="secret123")
     cmd_config_set(args)
 
     captured = capsys.readouterr()
@@ -114,9 +110,7 @@ def test_cmd_config_set_allows_non_secrets(
 ) -> None:
     from cli import cmd_config_set
 
-    args = argparse.Namespace(
-        hermes_home=str(tmp_path), key="workspace", value="my-ws"
-    )
+    args = argparse.Namespace(hermes_home=str(tmp_path), key="workspace", value="my-ws")
     cmd_config_set(args)
 
     captured = capsys.readouterr()
@@ -125,14 +119,10 @@ def test_cmd_config_set_allows_non_secrets(
     assert data["workspace"] == "my-ws"
 
 
-def test_cmd_config_set_rejects_api_key(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
+def test_cmd_config_set_rejects_api_key(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     from cli import cmd_config_set
 
-    args = argparse.Namespace(
-        hermes_home=str(tmp_path), key="api_key", value="key-abc"
-    )
+    args = argparse.Namespace(hermes_home=str(tmp_path), key="api_key", value="key-abc")
     cmd_config_set(args)
 
     captured = capsys.readouterr()
@@ -328,3 +318,41 @@ def test_cmd_update_lists_multiple_backups(
     captured = capsys.readouterr()
     assert captured.out.count("ai-memory.bak.") >= 2
     assert old_backup.name in captured.out
+
+
+def test_cmd_status_without_hermes_home_attribute(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The host's parser sets no `hermes_home`, which used to raise AttributeError.
+
+    `hermes ai-memory status` builds a bare namespace, so the subcommand has to
+    resolve the home itself — and read the counters where /admin/status nests
+    them.
+    """
+    from cli import cmd_status
+
+    mock_client = MagicMock()
+    mock_client.status.return_value = {
+        "version": "2.4.1",
+        "counts": {"pages_latest": 12, "sessions": 7, "observations": 40},
+    }
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    with patch("cli.AiMemoryClient", return_value=mock_client):
+        cmd_status(argparse.Namespace())
+
+    captured = capsys.readouterr()
+    assert "reachable" in captured.out
+    assert "12" in captured.out
+    assert "7" in captured.out
+    assert "2.4.1" in captured.out
+
+
+def test_cmd_config_without_hermes_home_attribute(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cli import cmd_config
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    cmd_config(argparse.Namespace())
+    assert "server_url" in capsys.readouterr().out

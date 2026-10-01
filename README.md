@@ -30,13 +30,14 @@ Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to [ai-mem
 
 ## Features
 
-- **Auto-prefetch** — wiki context injected before every model turn
+- **Background prefetch** — each turn's recall search runs on a daemon thread after the turn and is injected before the next one
 - **Turn capture** — async daemon-thread sync after each completed turn
 - **Pre-compaction checkpointing** — `pre-compact` hook on context compression (fork addition; see note above)
-- **Session finalization** — `session-end` hook on conversation close
-- **Memory mirroring** — built-in `MEMORY.md` writes mirrored to ai-memory wiki
-- **Hermes CLI integration** — `hermes memory setup`, `hermes memory status`
-- **Per-profile isolation** — project scoped by Hermes profile name
+- **Session finalization** — `session-end` hook on conversation close (the session id only, never the transcript)
+- **Memory mirroring** — built-in `MEMORY.md` / `USER.md` writes (`add`, `replace`) mirrored to the ai-memory wiki
+- **Hermes CLI integration** — `hermes memory setup` plus the plugin's own `hermes ai-memory status | config | config-set | link | update`
+- **Scope that matches the other agents** — explicit config, then the checkout's `.ai-memory.toml`, then the Hermes profile
+- **Safe in non-primary runs** — cron/subagent providers neither write nor consume the single-use handoff
 - **3 tool schemas** — `ai_memory_search`, `ai_memory_write`, `ai_memory_status`
 - **94% test coverage** — linted with ruff, type-checked with mypy
 
@@ -69,19 +70,20 @@ Hermes Agent → MemoryProvider ABC → AiMemoryProvider → AiMemoryClient → 
 | `client.py` | AiMemoryClient | Typed HTTP wrapper; search, write page, send hook, fetch handoff |
 | `config.py` | AiMemoryConfig | Config dataclass + JSON persistence + env-var fallback + secret filtering |
 | `cli.py` | CLI | `status`/`config`/`link` subcommands for `hermes memory` |
-| `plugin.yaml` | Manifest | Metadata, hooks declaration, pip dependencies |
+| `plugin.yaml` | Manifest | Metadata + `python_dependencies` (Hermes validates but never installs) |
 
 ## Lifecycle
 
 | Hermes hook | ai-memory call | Threading |
 |---|---|---|
 | `is_available()` | Checks `server_url` is configured | Sync |
-| `initialize()` | Resolves workspace/project from kwargs | Sync |
-| `prefetch(query)` | `GET /admin/search` | Sync |
-| `queue_prefetch(query)` | Spawns prefetch thread | Daemon thread |
-| `sync_turn(user, assistant)` | `POST /hook?event=user-prompt` | Daemon thread |
-| `on_session_end(messages)` | `POST /hook?event=session-end` | Daemon thread |
-| `on_memory_write(action, target, content)` | `POST /admin/write-page` | Sync |
+| `initialize()` | Resolves workspace/project, fetches the handoff once | Sync |
+| `prefetch(query, session_id)` | Consumes `queue_prefetch`'s cache, else `GET /admin/search` | Sync |
+| `queue_prefetch(query, session_id)` | `GET /admin/search` cached for the next turn | Daemon thread |
+| `recall_status()` | Hit count of the last `prefetch`, for the recall indicator | Sync |
+| `sync_turn(user, assistant)` | `POST /hook?event=user-prompt-submit` | Daemon thread |
+| `on_session_end(messages)` | `POST /hook?event=session-end` (session id only) | Daemon thread |
+| `on_memory_write(action, target, content)` | `POST /admin/write-page` for `add` / `replace` | Sync |
 | `handle_tool_call(name, args)` | Routes to search/write/status | Sync |
 
 ## Configuration
@@ -93,6 +95,8 @@ Hermes Agent → MemoryProvider ABC → AiMemoryProvider → AiMemoryClient → 
 | `AI_MEMORY_SERVER_URL` | `http://127.0.0.1:49374` | ai-memory server address |
 | `AI_MEMORY_API_KEY` | `""` | API key (sent as Bearer token) — **env-only, never written to disk** |
 | `AI_MEMORY_AUTH_TOKEN` | `""` | Auth token (alias for api_key) — **env-only, never written to disk** |
+| `AI_MEMORY_WORKSPACE` | `""` | Workspace name, overriding the file and the `.ai-memory.toml` marker |
+| `AI_MEMORY_PROJECT` | `""` | Project name, overriding the file and the `.ai-memory.toml` marker |
 
 Env vars override file config, which overrides defaults. Secrets (`api_key`, `auth_token`) are **never persisted to `ai-memory.json`** — they must be set via environment variables.
 
@@ -107,6 +111,8 @@ Written by `hermes memory setup` wizard. Only non-secret values are stored:
   "project": "hermes-default"
 }
 ```
+
+`workspace`/`project` set here (or via `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT`) are explicit: they win over the checkout's `.ai-memory.toml`. With neither set, the plugin adopts the marker at or above the session's `cwd`, so Hermes writes and reads the same ai-memory project the other agents in that repository use. See [Scope Resolution](docs/reference.md#scope-resolution).
 
 ### Secrets & Security
 

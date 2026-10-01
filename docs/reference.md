@@ -20,6 +20,17 @@ Precedence: **env vars > file config > defaults**
 
 `$HERMES_HOME/ai-memory.json`
 
+### Scope Resolution
+
+`initialize()` resolves `workspace` / `project` in this order:
+
+1. Explicit kwargs — `ai_memory_workspace`, `project`
+2. Explicit config — `workspace` / `project` in `ai-memory.json`, or `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT`
+3. The nearest `.ai-memory.toml` at or above the session's `cwd`, read with ai-memory's own line-based parser (a marker that pins no scope key is skipped)
+4. What Hermes reports — `agent_workspace`, then `agent_identity` as `hermes-<identity>` — and finally the defaults (`hermes` / `hermes-default`)
+
+A caller that reports no `cwd` never consults a marker, so it keeps its configured scope. The marker deliberately outranks Hermes's `agent_workspace` (the literal `"hermes"`): letting that value win pinned every session to a project no other agent in the same repository wrote to, which is what broke cross-agent handoff.
+
 ### Config Schema (for `hermes memory setup`)
 
 | Key | Secret | Env Only | Env Var | Default |
@@ -59,13 +70,15 @@ Returns `{"ok": true, "path": "..."}` or error dict.
 **HTTP:** `GET /admin/status`  
 **Timeout:** 10s
 
-Returns `{"pages": N, "sessions": N, ...}`.
+Returns the server's status report. The lifetime counters are nested under `counts` (`pages_latest`, `pages_all`, `sessions`, `observations`, `evidence_rows`), alongside `version` and `data_dir`.
 
-#### `send_hook(event, session_id, payload=None, workspace=None, project=None) → None`
+#### `send_hook(event, session_id, payload=None, workspace=None, project=None, cwd=None, timeout=None) → None`
 
-**HTTP:** `POST /hook?event=<event>&session_id=<sid>&workspace=<ws>&project=<proj>`  
-**Timeout:** 0.5s  
+**HTTP:** `POST /hook?event=<event>&session_id=<sid>&workspace=<ws>&project=<proj>&cwd=<cwd>`  
+**Timeout:** `timeout` when given, else `HOOK_TIMEOUT` (0.5s); the provider passes `SESSION_END_TIMEOUT` (10s) for `session-end`  
 **Errors:** Swallowed (logged at exception level)
+
+Dropped without a request while the client is paused: after `FAILURE_THRESHOLD` (3) consecutive transport failures it stops calling the server for `COOLDOWN_SECONDS` (60s), and `last_failure()` explains why. A successful request clears that state.
 
 #### `fetch_handoff(agent="hermes", cwd=None, workspace=None, project=None) → str | None`
 
@@ -84,17 +97,19 @@ Implements `MemoryProvider` ABC in `provider.py`.
 ### Methods
 
 - `is_available() → bool` — checks `server_url` is non-empty
-- `initialize(session_id, **kwargs)` — resolves workspace/project, reloads config
+- `unavailable_reason() → str` — the missing `server_url`, or the recorded transport failure; `""` while healthy
+- `initialize(session_id, **kwargs)` — resolves scope, reloads config, fetches the handoff once (skipped in non-primary contexts)
 - `get_config_schema() → list[dict]`
 - `save_config(values, hermes_home) → list[str]` — returns list of skipped secret keys
-- `get_tool_schemas() → list[dict]`
+- `get_tool_schemas() → list[dict]` — OpenAI function schemas (the `parameters` key)
 - `handle_tool_call(name, args) → str` (returns JSON string)
 - `system_prompt_block() → str`
-- `prefetch(query, *, session_id="") → str`
-- `queue_prefetch(query)` — spawns daemon thread
+- `prefetch(query, *, session_id="") → str` — cached hits from `queue_prefetch`, else a search; each hit is labelled `title (path): snippet`
+- `queue_prefetch(query, *, session_id="")` — daemon thread; caches results per `(session_id, query)` for the next turn
+- `recall_status() → RecallStatus | None` — hit count of the last `prefetch`, `None` when it injected nothing
 - `sync_turn(user, assistant, *, session_id="", **kwargs)` — daemon thread
-- `on_session_end(messages, **kwargs)` — daemon thread
-- `on_memory_write(action, target, content, metadata=None)`
+- `on_session_end(messages, **kwargs)` — daemon thread; sends the session id, never the transcript
+- `on_memory_write(action, target, content, metadata=None)` — mirrors `add` / `replace`; `remove` is skipped
 - `shutdown()`
 
 ## CLI (`register_cli`)
@@ -103,19 +118,19 @@ Registered via `register_cli(subparsers)` in `cli.py`.
 
 ### Subcommands
 
-#### `hermes memory status`
+#### `hermes ai-memory status`
 
-Checks ai-memory server reachability. Prints page/session counts or error.
+Checks ai-memory server reachability. Prints the server version and the page / session / observation counts read from `counts`.
 
-#### `hermes memory config`
+#### `hermes ai-memory config`
 
 Displays active config values (secrets show their source: env var or not set).
 
-#### `hermes memory config-set <key> <value>`
+#### `hermes ai-memory config-set <key> <value>`
 
 Sets a config value. Secrets (`api_key`, `auth_token`) are rejected with instructions to use the corresponding environment variable instead.
 
-#### `hermes memory link`
+#### `hermes ai-memory link`
 
 Creates a symlink `$HERMES_HOME/plugins/ai-memory → <plugin_dir>`.
 
@@ -125,13 +140,9 @@ Creates a symlink `$HERMES_HOME/plugins/ai-memory → <plugin_dir>`.
 name: ai-memory
 version: 0.1.0
 description: "ai-memory wiki-backed long-term memory provider"
-entry_point: __init__.py
-pip_dependencies:
+kind: exclusive
+python_dependencies:
   - httpx
-hooks:
-  - on_session_end
-  - sync_turn
-  - on_memory_write
 ```
 
 ## `register(ctx)`
