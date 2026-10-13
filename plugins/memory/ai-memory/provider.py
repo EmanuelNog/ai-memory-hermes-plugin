@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import threading
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from config import (  # noqa: E402
     load_config,
     marker_scope,
     save_config,
+    validated_directory,
 )
 
 try:
@@ -49,26 +51,54 @@ _PREFETCH_RESULTS = 3
 _PREFETCH_CACHE_MAX = 8
 
 
+@dataclass(frozen=True)
+class _OperationContext:
+    client: AiMemoryClient
+    session_id: str
+    workspace: str
+    project: str
+    cwd: str
+    search_scope: str
+    generation: int
+    scope_known: bool
+    writes_enabled: bool
+
+    def cache_key(self, query: str) -> tuple[str, str, str, str, str]:
+        return (self.session_id, self.search_scope, self.workspace, self.project, query)
+
+    def search_params(self) -> dict[str, str]:
+        if self.search_scope == "global":
+            return {}
+        return {"workspace": self.workspace, "project": self.project}
+
+
 class AiMemoryProvider(MemoryProvider):
     def __init__(
         self,
         client: AiMemoryClient | None = None,
         config: AiMemoryConfig | None = None,
     ) -> None:
-        self._config = config or AiMemoryConfig()
+        self._config = replace(config) if config is not None else AiMemoryConfig()
+        self._configured_config: AiMemoryConfig | None = None
+        self._scope_known = bool(
+            self._config.workspace and self._config.project
+            and self._config.project != AiMemoryConfig().project
+        )
         self._client = client or AiMemoryClient(self._config)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._generation = 0
         self.session_id: str = ""
         self._hermes_home: str = ""
         self._cwd: str = ""
+        self._cwd_normalized: str = ""
         # Non-primary contexts (subagent / cron / flush) get no writes and must
         # not consume the single-use handoff. The default keeps standalone
         # callers writing, since only Hermes reports a context.
         self._agent_context: str = "primary"
         self._writes_enabled: bool = True
         # Background recall from queue_prefetch, consumed once by prefetch:
-        # {(session_id, query): [hit, ...]}, oldest entry evicted first.
-        self._prefetch_cache: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        # Session, search mode, workspace, project and query; consume once.
+        self._prefetch_cache: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
         self._last_recall_count: int = 0
         # Previous-session handoff, fetched once per session in initialize()
         # and surfaced through system_prompt_block(). None = none pending.
@@ -91,20 +121,26 @@ class AiMemoryProvider(MemoryProvider):
         return f"ai-memory server unreachable ({failure})" if failure else ""
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
-        self.session_id = session_id
         hermes_home = kwargs.get("hermes_home", "")
-        self._hermes_home = hermes_home
-        # Hermes reports the context that owns this provider instance. A
-        # subagent or cron run must not write, and must not consume the
-        # single-use handoff meant for the session the user is watching.
-        self._agent_context = str(kwargs.get("agent_context") or "primary")
-        self._writes_enabled = self._agent_context in ("", "primary")
-        self._cwd = str(kwargs.get("cwd") or "")
-
         with self._lock:
-            if hermes_home:
-                self._config = load_config(hermes_home)
-                self._client = AiMemoryClient(self._config)
+            self.session_id = session_id
+            self._hermes_home = hermes_home
+            # Non-primary contexts must not write or consume a handoff.
+            self._agent_context = str(kwargs.get("agent_context") or "primary")
+            self._writes_enabled = self._agent_context in ("", "primary")
+            self._cwd = str(kwargs.get("cwd") or "")
+            directory = validated_directory(self._cwd)
+            self._cwd_normalized = str(directory) if directory is not None else ""
+            self._generation += 1
+            self._handoff_context = None
+            self._scope_known = False
+            self._prefetch_cache.clear()
+            self._last_recall_count = 0
+            if self._configured_config is None:
+                self._configured_config = replace(self._config)
+            self._config = load_config(
+                hermes_home, base=self._configured_config if not hermes_home else None
+            )
 
             server_url = kwargs.get("ai_memory_server_url", "")
             if server_url:
@@ -115,21 +151,32 @@ class AiMemoryProvider(MemoryProvider):
                 self._config.auth_token = auth_token
 
             self._resolve_scope(kwargs, hermes_home)
+            diagnostics = self.scope_diagnostics()
+            log.info(
+                "ai-memory scope: cwd_received=%r cwd_normalized=%r "
+                "search_scope=%r workspace=%r project=%r scope_known=%r "
+                "writes_allowed=%r project_search_allowed=%r",
+                diagnostics["cwd_received"], diagnostics["cwd_normalized"],
+                diagnostics["search_scope"], diagnostics["workspace"], diagnostics["project"],
+                diagnostics["scope_known"], diagnostics["writes_allowed"],
+                diagnostics["project_search_allowed"],
+            )
 
             self._client = AiMemoryClient(self._config)
+            context = self._snapshot()
 
         # One handoff fetch per session, never polled. Loopback server plus
         # a 2s timeout, so a synchronous call cannot hold up startup, and
         # any failure leaves the provider working without a handoff.
-        self._handoff_context = None
-        if not self._writes_enabled:
+        if not self._has_write_scope(context):
             return
         try:
-            self._handoff_context = self._client.fetch_handoff(
-                agent="hermes",
-                workspace=self._config.workspace,
-                project=self._config.project,
+            handoff = context.client.fetch_handoff(
+                agent="hermes", workspace=context.workspace, project=context.project
             )
+            with self._lock:
+                if context.generation == self._generation:
+                    self._handoff_context = handoff
         except Exception:
             log.warning("ai-memory handoff fetch failed", exc_info=True)
 
@@ -149,12 +196,13 @@ class AiMemoryProvider(MemoryProvider):
         the last resort instead of the value of every session.
         """
         explicit = explicit_scope_keys(hermes_home)
+        overrides = load_config(hermes_home)
         marker = marker_scope(self._cwd)
 
         # `agent_workspace` is a workspace NAME, not a filesystem path.
         workspace = kwargs.get("ai_memory_workspace", "")
         if not workspace and "workspace" in explicit:
-            workspace = self._config.workspace
+            workspace = overrides.workspace
         if not workspace:
             workspace = marker.get("workspace", "")
         if not workspace:
@@ -164,14 +212,57 @@ class AiMemoryProvider(MemoryProvider):
 
         project = kwargs.get("project", "")
         if not project and "project" in explicit:
-            project = self._config.project
+            project = overrides.project
         if not project:
             project = marker.get("project", "")
+        self._scope_known = bool(
+            project or (self._config.project and self._config.project != AiMemoryConfig().project)
+        )
         if project:
             self._config.project = project
         elif not self._config.project:
             identity = kwargs.get("agent_identity", "") or "default"
             self._config.project = f"hermes-{identity}"
+
+    def scope_diagnostics(self) -> dict[str, Any]:
+        """Allowlisted local state only: no network, secrets, or memory content.
+
+        Read the current instance, not a new provider or process cwd. An empty
+        normalized path means the received cwd was absent or invalid.
+        """
+        with self._lock:
+            context = self._snapshot()
+            return {
+                "cwd_received": self._cwd,
+                "cwd_normalized": self._cwd_normalized,
+                "search_scope": context.search_scope,
+                "workspace": context.workspace,
+                "project": context.project,
+                "scope_known": context.scope_known,
+                "writes_allowed": self._has_write_scope(context),
+                "project_search_allowed": context.scope_known,
+            }
+
+    def _snapshot(self, session_id: str = "") -> _OperationContext:
+        with self._lock:
+            return _OperationContext(
+                client=self._client,
+                session_id=session_id or self.session_id,
+                workspace=self._config.workspace,
+                project=self._config.project,
+                cwd=self._cwd,
+                search_scope=self._config.search_scope,
+                generation=self._generation,
+                scope_known=bool(
+                    self._scope_known and self._config.workspace.strip()
+                    and self._config.project.strip()
+                ),
+                writes_enabled=self._writes_enabled,
+            )
+
+    def _has_write_scope(self, context: _OperationContext | None = None) -> bool:
+        context = context or self._snapshot()
+        return context.writes_enabled and context.scope_known
 
     def get_config_schema(self) -> list[dict[str, Any]]:
         return get_config_schema()
@@ -230,23 +321,26 @@ class AiMemoryProvider(MemoryProvider):
         return self._BASE_PROMPT + "\n\nPrevious session handoff:\n" + self._handoff_context
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        sid = session_id or self.session_id
+        context = self._snapshot(session_id)
         with self._lock:
-            hits = self._prefetch_cache.pop((sid, query), None)
+            hits = self._prefetch_cache.pop(context.cache_key(query), None)
         if hits is None:
-            # No background recall queued for this exact turn (first turn of a
-            # session, or queue_prefetch had nothing to work with).
-            results = self._search({"query": query, "max_results": _PREFETCH_RESULTS})
+            results = self._search(
+                {"query": query, "max_results": _PREFETCH_RESULTS}, context=context
+            )
             hits = results.get("results", []) if isinstance(results, dict) else []
-        self._last_recall_count = len(hits)
+        with self._lock:
+            if context.generation != self._generation:
+                return ""
+            self._last_recall_count = len(hits)
         return self._format_recall(hits)
 
     @staticmethod
     def _format_recall(hits: list[dict[str, Any]]) -> str:
         """One block per hit, labelled with its page path when the server sends one.
 
-        Recall is deliberately global (every project), so the injected context
-        has to say where each fact came from.
+        Global is the legacy default; project mode restricts the search.
+        Both modes label recalled facts with their source page.
         """
         lines: list[str] = []
         for hit in hits:
@@ -261,20 +355,29 @@ class AiMemoryProvider(MemoryProvider):
         """Recall in the background so the next turn's prefetch is a cache hit.
 
         Hermes calls this after each turn with that turn's ``session_id``;
-        results are cached per ``(session_id, query)`` and consumed once.
+        Cache keys include session, search mode, workspace, project and query.
+        Scope and client are captured before dispatch; stale workers cannot
+        repopulate the cache after initialization or a session switch.
         """
-        sid = session_id or self.session_id
         if not query:
             return
+        context = self._snapshot(session_id)
+        if context.search_scope == "project" and not context.scope_known:
+            return
+        key = context.cache_key(query)
 
         def _do() -> None:
             try:
-                hits = self._client.search(query=query, limit=_PREFETCH_RESULTS)
+                hits = context.client.search(
+                    query=query, limit=_PREFETCH_RESULTS, **context.search_params()
+                )
             except Exception:
                 log.warning("ai-memory queue_prefetch failed", exc_info=True)
                 return
             with self._lock:
-                self._prefetch_cache[(sid, query)] = hits
+                if context.generation != self._generation:
+                    return
+                self._prefetch_cache[key] = hits
                 while len(self._prefetch_cache) > _PREFETCH_CACHE_MAX:
                     self._prefetch_cache.pop(next(iter(self._prefetch_cache)))
 
@@ -287,12 +390,12 @@ class AiMemoryProvider(MemoryProvider):
         return RecallStatus(provider_label=self.name, count=self._last_recall_count)
 
     def sync_turn(self, user: str, assistant: str, *, session_id: str = "", **kwargs: Any) -> None:
-        if not self._writes_enabled:
+        context = self._snapshot(session_id)
+        if not self._has_write_scope(context):
             return
-        sid = session_id or self.session_id
-        ws = self._config.workspace
-        proj = self._config.project
-        cwd = self._cwd
+        sid, ws, proj, cwd = (
+            context.session_id, context.workspace, context.project, context.cwd
+        )
 
         def _do() -> None:
             try:
@@ -301,7 +404,7 @@ class AiMemoryProvider(MemoryProvider):
                 # accepted with 202 and then stored with an EMPTY body,
                 # because ai-memory reads `prompt` off a
                 # `user-prompt-submit` payload. Every Hermes turn was lost.
-                self._client.send_hook(
+                context.client.send_hook(
                     event="user-prompt-submit",
                     session_id=sid,
                     payload={"session_id": sid, "prompt": user},
@@ -315,12 +418,12 @@ class AiMemoryProvider(MemoryProvider):
         threading.Thread(target=_do, daemon=True).start()
 
     def on_session_end(self, messages: list[dict[str, Any]], **kwargs: Any) -> None:
-        if not self._writes_enabled:
+        context = self._snapshot()
+        if not self._has_write_scope(context):
             return
-        sid = self.session_id
-        ws = self._config.workspace
-        proj = self._config.project
-        cwd = self._cwd
+        sid, ws, proj, cwd = (
+            context.session_id, context.workspace, context.project, context.cwd
+        )
 
         def _do() -> None:
             try:
@@ -329,7 +432,7 @@ class AiMemoryProvider(MemoryProvider):
                 # handoff. Posting the transcript only risked the 0.5s turn-hook
                 # timeout dropping the close, so the payload stays minimal and
                 # the call gets the write budget instead.
-                self._client.send_hook(
+                context.client.send_hook(
                     event="session-end",
                     session_id=sid,
                     payload={"session_id": sid},
@@ -359,7 +462,8 @@ class AiMemoryProvider(MemoryProvider):
         ``metadata["previous_content"]``, which is kept in the mirrored page so
         the replacement does not silently drop it.
         """
-        if not self._writes_enabled:
+        context = self._snapshot()
+        if not self._has_write_scope(context):
             return
         if action not in self._MIRRORED_ACTIONS:
             return
@@ -371,12 +475,12 @@ class AiMemoryProvider(MemoryProvider):
             body = f"{content}\n\n{self._REPLACED_HEADING}\n\n{previous}"
 
         try:
-            self._client.write_page(
+            context.client.write_page(
                 path=f"hermes-memory/{target}.md",
                 body=body,
                 tags=["hermes", "mirror"],
-                workspace=self._config.workspace,
-                project=self._config.project,
+                workspace=context.workspace,
+                project=context.project,
             )
         except Exception:
             log.warning("on_memory_write hook failed", exc_info=True)
@@ -399,6 +503,9 @@ class AiMemoryProvider(MemoryProvider):
         """
         with self._lock:
             self.session_id = new_session_id
+            self._generation += 1
+            self._prefetch_cache.clear()
+            self._last_recall_count = 0
             if reset:
                 # A reset starts a clean context; the previous session's
                 # handoff must not leak into it.
@@ -407,25 +514,31 @@ class AiMemoryProvider(MemoryProvider):
     def shutdown(self) -> None:
         pass
 
-    def _search(self, args: dict[str, Any]) -> dict[str, Any]:
+    def _search(
+        self, args: dict[str, Any], *, context: _OperationContext | None = None
+    ) -> dict[str, Any]:
         query = args.get("query", "")
         max_results = args.get("max_results", 5)
         if not isinstance(max_results, int) or isinstance(max_results, bool):
             max_results = 5
-        # Deliberately UNSCOPED: recall searches every project so Hermes
-        # can see what Claude Code and Codex wrote in their own projects.
-        # Writes stay scoped to the Hermes workspace/project; only reads
-        # are global.
-        results = self._client.search(query=query, limit=max_results)
+        context = context or self._snapshot()
+        if context.search_scope == "project" and not context.scope_known:
+            return {"ok": False, "error": "Project scope is unknown", "results": []}
+        results = context.client.search(
+            query=query, limit=max_results, **context.search_params()
+        )
         return {"ok": True, "results": results}
 
     def _write(self, args: dict[str, Any]) -> dict[str, Any]:
-        result = self._client.write_page(
+        context = self._snapshot()
+        if not self._has_write_scope(context):
+            return {"ok": False, "error": "Write disabled: project scope is unknown or non-primary"}
+        result = context.client.write_page(
             path=args.get("path", ""),
             body=args.get("body", ""),
             tags=args.get("tags"),
-            workspace=self._config.workspace,
-            project=self._config.project,
+            workspace=context.workspace,
+            project=context.project,
         )
         if not (result.get("ok", False) or result.get("page_id")):
             return result

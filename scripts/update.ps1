@@ -302,8 +302,7 @@ if (-not $Script:DoDryRun) {
     else {
         $defaultConfig = @{
             server_url = "http://127.0.0.1:49374"
-            workspace  = "hermes"
-            project    = "hermes-default"
+            search_scope = "global"
         }
         $defaultConfig | ConvertTo-Json | Set-Content -Path $ConfigFile -Encoding UTF8
         Write-Info "Config:      $ConfigFile (created)"

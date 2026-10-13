@@ -298,8 +298,7 @@ if [ "$DRY_RUN" != "true" ]; then
     cat > "$CONFIG_FILE" <<EOF
 {
   "server_url": "$AI_MEMORY_SERVER_URL",
-  "workspace": "hermes",
-  "project": "hermes-default"
+  "search_scope": "global"
 }
 EOF
     info "Config:      $CONFIG_FILE (created)"

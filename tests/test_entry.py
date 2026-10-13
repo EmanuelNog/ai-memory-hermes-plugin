@@ -133,3 +133,20 @@ def test_register_uses_env_var_overrides(tmp_path: Path, monkeypatch: pytest.Mon
     provider = args[0]
     assert provider._config.server_url == "http://env-override:49374"
     assert provider._config.auth_token == "env-token"
+
+
+@pytest.mark.parametrize("source", ["file", "env"])
+def test_register_loads_search_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    from __init__ import register
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    if source == "file":
+        (tmp_path / "ai-memory.json").write_text(json.dumps({"search_scope": "project"}))
+    else:
+        monkeypatch.setenv("AI_MEMORY_SEARCH_SCOPE", "project")
+    ctx = MagicMock()
+    register(ctx)
+    provider = ctx.register_memory_provider.call_args.args[0]
+    assert provider._config.search_scope == "project"
