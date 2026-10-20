@@ -248,8 +248,7 @@ if (-not (Test-Path $ConfigFile)) {
     else {
         $Config = @{
             server_url = $ServerUrl
-            workspace  = "hermes"
-            project    = "hermes-default"
+            search_scope = "global"
         }
         $Config | ConvertTo-Json | Set-Content -Path $ConfigFile -Encoding UTF8
     }

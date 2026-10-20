@@ -284,7 +284,9 @@ def test_cmd_update_creates_default_config(
     assert config_file.exists()
     config = json.loads(config_file.read_text())
     assert config["server_url"] == "http://127.0.0.1:49374"
-    assert config["workspace"] == "hermes"
+    assert config["search_scope"] == "global"
+    assert "workspace" not in config
+    assert "project" not in config
 
 
 def test_cmd_update_lists_multiple_backups(

@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ _ENV_MAP: dict[str, str] = {
     "AI_MEMORY_API_KEY": "api_key",
     "AI_MEMORY_WORKSPACE": "workspace",
     "AI_MEMORY_PROJECT": "project",
+    "AI_MEMORY_SEARCH_SCOPE": "search_scope",
 }
 
 # Scope keys ``.ai-memory.toml`` may pin, in the server's own order.
@@ -39,6 +40,20 @@ class AiMemoryConfig:
     auth_token: str = ""
     workspace: str = "hermes"
     project: str = "hermes-default"
+    search_scope: str = "global"
+
+    def __post_init__(self) -> None:
+        _validate_search_scope(self.search_scope)
+
+
+def _validate_search_scope(value: Any) -> None:
+    if value not in ("global", "project"):
+        raise ValueError("search_scope must be global or project")
+
+
+def _validate_scope_origin(values: dict[str, Any]) -> None:
+    if "scope_origin" in values and values["scope_origin"] not in ("automatic", "explicit"):
+        raise ValueError("scope_origin must be automatic or explicit")
 
 
 def get_config_schema() -> list[dict[str, Any]]:
@@ -66,15 +81,22 @@ def get_config_schema() -> list[dict[str, Any]]:
             "env_var": "AI_MEMORY_AUTH_TOKEN",
         },
         {
+            "key": "search_scope",
+            "description": "Recall scope: global (legacy default) or project",
+            "default": "global",
+            "choices": ["global", "project"],
+            "required": False,
+        },
+        {
             "key": "workspace",
-            "description": "ai-memory workspace name",
-            "default": "hermes",
+            "description": "Workspace override (blank uses the directory marker)",
+            "default": "",
             "required": False,
         },
         {
             "key": "project",
-            "description": "ai-memory project name",
-            "default": "hermes-default",
+            "description": "Project override (blank uses the directory marker)",
+            "default": "",
             "required": False,
         },
     ]
@@ -93,6 +115,9 @@ def _secret_keys() -> dict[str, str]:
 
 def save_config(values: dict[str, Any], hermes_home: str) -> list[str]:
     """Save non-secret config values to disk. Returns list of skipped secret keys."""
+    if "search_scope" in values:
+        _validate_search_scope(values["search_scope"])
+    _validate_scope_origin(values)
     secrets = _secret_keys()
     skipped: list[str] = []
     safe_values: dict[str, Any] = {}
@@ -108,7 +133,7 @@ def save_config(values: dict[str, Any], hermes_home: str) -> list[str]:
     existing: dict[str, Any] = {}
     if p.exists():
         try:
-            existing = json.loads(p.read_text())
+            existing = json.loads(p.read_text(encoding="utf-8-sig"))
         except Exception:
             pass
 
@@ -117,6 +142,13 @@ def save_config(values: dict[str, Any], hermes_home: str) -> list[str]:
         existing.pop(secret_key, None)
 
     existing.update(safe_values)
+    for key in _MARKER_SCOPE_KEYS:
+        if key in safe_values and not str(safe_values[key]).strip():
+            existing.pop(key, None)
+    if "scope_origin" not in safe_values and any(
+        str(safe_values.get(key, "")).strip() for key in _MARKER_SCOPE_KEYS
+    ):
+        existing["scope_origin"] = "explicit"
     p.write_text(json.dumps(existing, indent=2))
     return skipped
 
@@ -128,9 +160,26 @@ def _read_overrides(hermes_home: str) -> dict[str, Any]:
 
     if p is not None and p.exists():
         try:
-            overrides = json.loads(p.read_text())
+            overrides = json.loads(p.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError):
             overrides = {}
+
+    _validate_scope_origin(overrides)
+    # Only the complete legacy-generated shape is ambiguous. Never infer
+    # provenance from a project name alone or reinterpret customized files.
+    effective_mode = os.environ.get("AI_MEMORY_SEARCH_SCOPE") or overrides.get(
+        "search_scope", "global"
+    )
+    legacy_keys = {"server_url", "workspace", "project", "search_scope", "scope_origin"}
+    if (
+        effective_mode == "project"
+        and overrides.get("scope_origin") != "explicit"
+        and set(overrides) <= legacy_keys
+        and overrides.get("workspace") == "hermes"
+        and overrides.get("project") == "hermes-default"
+    ):
+        overrides.pop("workspace")
+        overrides.pop("project")
 
     for env_key, attr in _ENV_MAP.items():
         val = os.environ.get(env_key)
@@ -174,6 +223,23 @@ def _parse_marker_key(text: str, key: str) -> str:
     return ""
 
 
+def validated_directory(cwd: str) -> Path | None:
+    """Native absolute existing directory, never anchored to the process cwd.
+
+    MSYS spellings are deliberately not translated here: the host's --in
+    already translates them, but must still pass its session cwd to providers.
+    """
+    if not cwd:
+        return None
+    try:
+        directory = Path(cwd).expanduser()
+        if directory.is_absolute() and directory.is_dir():
+            return directory
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def marker_scope(cwd: str) -> dict[str, str]:
     """``workspace``/``project`` declared by the nearest ``.ai-memory.toml``.
 
@@ -182,12 +248,8 @@ def marker_scope(cwd: str) -> dict[str, str]:
     skipped, matching the server's own walk-up. Returns ``{}`` when *cwd* is
     empty, so a caller without a working directory keeps the configured scope.
     """
-    if not cwd:
-        return {}
-
-    try:
-        directory = Path(cwd).expanduser().absolute()
-    except OSError:
+    directory = validated_directory(cwd)
+    if directory is None:
         return {}
 
     home = Path.home().absolute()
@@ -208,8 +270,10 @@ def marker_scope(cwd: str) -> dict[str, str]:
         directory = directory.parent
 
 
-def load_config(hermes_home: str) -> AiMemoryConfig:
+def load_config(hermes_home: str, base: AiMemoryConfig | None = None) -> AiMemoryConfig:
+    """Apply file/env overrides to defaults or an unscoped programmatic base."""
     overrides = _read_overrides(hermes_home)
-    overrides.setdefault("server_url", DEFAULT_SERVER_URL)
-
-    return AiMemoryConfig(**{k: v for k, v in overrides.items() if hasattr(AiMemoryConfig, k)})
+    return replace(
+        base or AiMemoryConfig(),
+        **{k: v for k, v in overrides.items() if hasattr(AiMemoryConfig, k)},
+    )

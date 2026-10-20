@@ -95,6 +95,7 @@ def cmd_config(args: argparse.Namespace) -> None:
         print(f"  {key}: {status}")
     print(f"  workspace:  {config.workspace}")
     print(f"  project:    {config.project}")
+    print(f"  search_scope: {config.search_scope}")
 
 
 def cmd_config_set(args: argparse.Namespace) -> None:
@@ -234,8 +235,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     else:
         default_config = {
             "server_url": "http://127.0.0.1:49374",
-            "workspace": "hermes",
-            "project": "hermes-default",
+            "search_scope": "global",
         }
         config_body = ",\n".join(f'  "{k}": "{v}"' for k, v in default_config.items())
         config_file.write_text("{\n" + config_body + "\n}\n")
