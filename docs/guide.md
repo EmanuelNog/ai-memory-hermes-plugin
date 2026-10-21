@@ -106,14 +106,20 @@ hermes ai-memory config
 
 ### Project Isolation
 
-The provider writes and reads the project the repository declares, so Hermes shares memory with the other agents working in the same checkout. `initialize()` resolves the scope in this order:
+The provider writes to the resolved project. Reads remain global by default for compatibility; choose `search_scope=project` to restrict searches and recall to that project. `initialize()` resolves the scope in this order:
 
 1. Explicit kwargs — `ai_memory_workspace`, `project`
 2. Explicit config — `workspace` / `project` in `$HERMES_HOME/ai-memory.json`, or `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT`
 3. The nearest `.ai-memory.toml` at or above the session's working directory
 4. What Hermes reports — `agent_workspace`, then `agent_identity` as `hermes-{profile}` (defaults: `hermes` / `hermes-default`)
 
-With no repository marker and no explicit config, each profile keeps its own `hermes-{profile}` project, as before.
+For legacy-generated `hermes` / `hermes-default` pairs, see the deterministic [compatibility rule and explicit opt-out](../README.md#legacy-scope-defaults-and-explicit-overrides). New installers leave scope unset; leave setup scope prompts blank to use markers.
+
+For a single profile with folder-based memory, set `search_scope` to `project` in `ai-memory.json` (or `AI_MEMORY_SEARCH_SCOPE`) and omit fixed workspace/project overrides. The nearest applicable marker above the absolute, existing session directory wins, including markers within monorepo applications.
+
+With no project marker and no configured project, writes and handoff consumption are blocked. Explicit default-project configuration is still supported. Project-mode recall with unknown scope returns no results rather than falling back to global search.
+
+Folder changes inside an existing session do **not** re-resolve this provider's scope. Start a new provider/session initialized with the target folder; `/new` or `/reset` that only switches the ID does not change folder scope. No process-cwd fallback is used.
 
 ## Lifecycle Behavior
 

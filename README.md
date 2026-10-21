@@ -97,6 +97,7 @@ Hermes Agent → MemoryProvider ABC → AiMemoryProvider → AiMemoryClient → 
 | `AI_MEMORY_AUTH_TOKEN` | `""` | Auth token (alias for api_key) — **env-only, never written to disk** |
 | `AI_MEMORY_WORKSPACE` | `""` | Workspace name, overriding the file and the `.ai-memory.toml` marker |
 | `AI_MEMORY_PROJECT` | `""` | Project name, overriding the file and the `.ai-memory.toml` marker |
+| `AI_MEMORY_SEARCH_SCOPE` | `global` | Search/recall mode: `global` or `project` |
 
 Env vars override file config, which overrides defaults. Secrets (`api_key`, `auth_token`) are **never persisted to `ai-memory.json`** — they must be set via environment variables.
 
@@ -107,12 +108,27 @@ Written by `hermes memory setup` wizard. Only non-secret values are stored:
 ```json
 {
   "server_url": "http://127.0.0.1:49374",
-  "workspace": "hermes",
-  "project": "hermes-default"
+  "search_scope": "global"
 }
 ```
 
-`workspace`/`project` set here (or via `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT`) are explicit: they win over the checkout's `.ai-memory.toml`. With neither set, the plugin adopts the marker at or above the session's `cwd`, so Hermes writes and reads the same ai-memory project the other agents in that repository use. See [Scope Resolution](docs/reference.md#scope-resolution).
+`workspace`/`project` overrides set here (except the legacy-generated pair described below), or via `AI_MEMORY_WORKSPACE` / `AI_MEMORY_PROJECT`, are explicit: they win over the nearest applicable `.ai-memory.toml` at or above the absolute, existing session directory supplied during initialization.
+
+`search_scope` is optional: `global` preserves legacy searches across all projects; `project` restricts search tools and both recall paths to the resolved project. For folder isolation with a single profile, use `{"search_scope": "project"}` and omit fixed workspace/project overrides so the markers can route each new session. A nested marker in `imperio_2026/apps/socorro_financeiro` takes precedence over the root marker.
+
+When scope is unknown, project searches return no results and writes (including mirrors, lifecycle hooks and handoff consumption) are blocked. An explicitly configured default project remains supported. Resolved scope from a previous initialization is never a fallback for the next one.
+
+**Changing folders during an existing session does not update this provider's scope.** Start a new provider/session initialized with the target directory; switching the session ID alone is insufficient. The plugin never infers the session directory from `os.getcwd()`. See [Scope Resolution](docs/reference.md#scope-resolution).
+
+### Legacy scope defaults and explicit overrides
+
+New installers/updaters omit fixed workspace/project values. In `hermes memory setup`, leave those prompts blank for directory routing; `search_scope` accepts only `global` or `project`. `hermes ai-memory config` also displays the read policy (not the session-specific TOML resolution).
+
+For old files, a narrow compatibility rule applies **only in project mode** (including `AI_MEMORY_SEARCH_SCOPE=project`): the complete pair `workspace=hermes`, `project=hermes-default`, with no keys other than `server_url`, `workspace`, `project`, `search_scope`, `scope_origin`, is treated as automatic unless `scope_origin=explicit`. Resolution does not rewrite the file. Global mode is unchanged. Single-key overrides, custom values, additional configuration keys, environment variables and initialization kwargs remain explicit.
+
+The old format cannot prove whether an identical pair was installed automatically or typed manually. For an intentional fixed pair, set `hermes ai-memory config-set scope_origin explicit` **before enabling project mode**, or re-save the workspace/project with `config-set`. Saving a nonblank scope via setup/CLI records `scope_origin=explicit`; `automatic` is also accepted, but never demotes customized values. Blank scope inputs remove those file overrides. Invalid origin/policy values are rejected before saving.
+
+For automatic folder routing, set `hermes ai-memory config-set search_scope project` and leave scope overrides unset. Each new provider must receive the intended absolute directory; scope does not change dynamically within an existing provider.
 
 ### Secrets & Security
 

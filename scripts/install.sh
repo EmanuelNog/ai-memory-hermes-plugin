@@ -267,8 +267,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     cat > "$CONFIG_FILE" <<EOF
 {
   "server_url": "$AI_MEMORY_SERVER_URL",
-  "workspace": "hermes",
-  "project": "hermes-default"
+  "search_scope": "global"
 }
 EOF
   fi

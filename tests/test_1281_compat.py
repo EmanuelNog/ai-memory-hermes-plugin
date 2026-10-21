@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -93,18 +94,17 @@ def test_search_without_scope_sends_no_workspace_or_project(cfg: AiMemoryConfig)
     assert params == {"q": "q", "limit": "3"}
 
 
-def test_provider_search_is_global(offline_provider: AiMemoryProvider) -> None:
-    """Recall must span every project so Claude/Codex memories are visible."""
+def test_provider_search_is_scoped(offline_provider: AiMemoryProvider) -> None:
     offline_provider._client.search.return_value = []
-    offline_provider._search({"query": "shared fact", "max_results": 4})
-    offline_provider._client.search.assert_called_once_with(query="shared fact", limit=4)
-    kwargs = offline_provider._client.search.call_args.kwargs
-    assert "workspace" not in kwargs
-    assert "project" not in kwargs
+    offline_provider._config.search_scope = "project"
+    offline_provider._search({"query": "private fact", "max_results": 4})
+    offline_provider._client.search.assert_called_once_with(
+        query="private fact", limit=4, workspace="hermes", project="hermes-test"
+    )
 
 
 def test_provider_write_stays_scoped(offline_provider: AiMemoryProvider) -> None:
-    """Only reads go global — writes keep the Hermes scope."""
+    """Search and writes are restricted to the active project."""
     offline_provider._client.write_page.return_value = {"ok": True}
     offline_provider._write({"path": "p.md", "body": "b"})
     kwargs = offline_provider._client.write_page.call_args.kwargs
@@ -394,6 +394,33 @@ def test_marker_scope_beats_the_hermes_workspace_literal(
     )
     assert offline_provider._config.workspace == "default"
     assert offline_provider._config.project == "Caminhar"
+
+
+# Directory-scoped recall regression tests
+
+def test_queue_prefetch_passes_scope_and_cache_is_scope_keyed(
+    offline_provider: AiMemoryProvider,
+    wait_for_prefetch: Callable[[AiMemoryProvider, str, str], None],
+) -> None:
+    offline_provider._config.search_scope = "project"
+    offline_provider._client.search.return_value = [{"snippet": "private"}]
+    offline_provider.queue_prefetch("secret", session_id="session-a")
+    wait_for_prefetch(offline_provider, "secret", "session-a")
+    assert offline_provider.prefetch("secret", session_id="session-a") == "private"
+    offline_provider._client.search.assert_called_once_with(
+        query="secret", limit=3, workspace="hermes", project="hermes-test"
+    )
+
+
+def test_prefetch_misses_other_project_cache(offline_provider: AiMemoryProvider) -> None:
+    offline_provider._config.search_scope = "project"
+    key = ("session-a", "project", "hermes", "other-project", "secret")
+    offline_provider._prefetch_cache[key] = [{"snippet": "must not leak"}]
+    offline_provider._client.search.return_value = [{"snippet": "current project"}]
+    assert offline_provider.prefetch("secret", session_id="session-a") == "current project"
+    offline_provider._client.search.assert_called_once_with(
+        query="secret", limit=3, workspace="hermes", project="hermes-test"
+    )
 
 
 def test_explicit_config_beats_the_marker_per_key(

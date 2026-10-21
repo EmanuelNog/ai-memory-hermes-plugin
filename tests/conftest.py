@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import socket
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +22,38 @@ sys.path.insert(
 from client import AiMemoryClient
 from config import AiMemoryConfig
 from provider import AiMemoryProvider
+
+
+@pytest.fixture(autouse=True)
+def isolated_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never read the active profile or connect to a real server in this suite."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    for key in (
+        "AI_MEMORY_WORKSPACE", "AI_MEMORY_PROJECT", "AI_MEMORY_SEARCH_SCOPE",
+        "AI_MEMORY_SERVER_URL", "AI_MEMORY_AUTH_TOKEN", "AI_MEMORY_API_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    def denied(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Real network connections are forbidden in tests")
+
+    monkeypatch.setattr(socket.socket, "connect", denied)
+    monkeypatch.setattr(socket.socket, "connect_ex", denied)
+
+
+@pytest.fixture
+def wait_for_prefetch() -> Callable[[AiMemoryProvider, str, str], None]:
+    def wait(provider: AiMemoryProvider, query: str, session_id: str) -> None:
+        key = provider._snapshot(session_id).cache_key(query)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            with provider._lock:
+                if key in provider._prefetch_cache:
+                    return
+            time.sleep(0.001)
+        raise AssertionError(f"Prefetch cache not populated: {key}")
+
+    return wait
 
 
 @pytest.fixture

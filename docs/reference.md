@@ -13,6 +13,7 @@ Dataclass in `config.py`. Fields:
 | `auth_token` | `str` | `""` | Auth token alias |
 | `workspace` | `str` | `"hermes"` | ai-memory workspace name |
 | `project` | `str` | `"hermes-default"` | ai-memory project name |
+| `search_scope` | `str` | `"global"` | `global` (legacy recall) or `project` (isolated recall); other values are rejected |
 
 Precedence: **env vars > file config > defaults**
 
@@ -29,7 +30,13 @@ Precedence: **env vars > file config > defaults**
 3. The nearest `.ai-memory.toml` at or above the session's `cwd`, read with ai-memory's own line-based parser (a marker that pins no scope key is skipped)
 4. What Hermes reports — `agent_workspace`, then `agent_identity` as `hermes-<identity>` — and finally the defaults (`hermes` / `hermes-default`)
 
-A caller that reports no `cwd` never consults a marker, so it keeps its configured scope. The marker deliberately outranks Hermes's `agent_workspace` (the literal `"hermes"`): letting that value win pinned every session to a project no other agent in the same repository wrote to, which is what broke cross-agent handoff.
+Only an absolute, existing directory is eligible for marker lookup. Missing, relative and file paths are not anchored to process cwd and do not inherit a parent marker. A missing marker or an incomplete scope cannot authorize writes through implicit profile/default project labels. Explicit project configuration (including `hermes-default`) remains supported; custom programmatic project values remain a configured fallback. Each initialization starts from configuration, never from the previously resolved marker scope.
+
+`search_scope=global` preserves legacy global search; `search_scope=project` applies the resolved scope to every provider search/prefetch. An unknown scope in project mode returns an error/empty recall, never global results. Writes, lifecycle capture, mirrors and handoff consumption require a known workspace/project and a primary context in either search mode.
+
+**No dynamic directory-scope switching:** the memory-provider contract supplies the construction cwd at `initialize()`, not the updated live agent cwd. A new initialized provider with the target directory is required; `on_session_switch()` updates the session ID and invalidates recall, but does not re-resolve cwd. See the [Hermes contract](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin).
+
+Legacy-generated default pairs are exempt from explicit file precedence only in project mode and only for the narrow format documented in [Legacy scope defaults](../README.md#legacy-scope-defaults-and-explicit-overrides). `scope_origin=explicit` preserves an intentional default pair; saving nonblank scope values records that metadata. Install/update defaults and blank setup answers do not pin projects. UTF-8 files with a BOM (PowerShell 5.1) are supported. Loading never writes migration changes to the profile.
 
 ### Config Schema (for `hermes memory setup`)
 
@@ -38,8 +45,9 @@ A caller that reports no `cwd` never consults a marker, so it keeps its configur
 | `server_url` | no | no | — | `http://127.0.0.1:49374` |
 | `api_key` | yes | yes | `AI_MEMORY_API_KEY` | `""` |
 | `auth_token` | yes | yes | `AI_MEMORY_AUTH_TOKEN` | `""` |
-| `workspace` | no | no | — | `"hermes"` |
-| `project` | no | no | — | `"hermes-default"` |
+| `workspace` | no | no | — | `""` (directory routing) |
+| `project` | no | no | — | `""` (directory routing) |
+| `search_scope` | no | no | `AI_MEMORY_SEARCH_SCOPE` | `"global"` |
 
 **Env Only** fields are never written to `ai-memory.json`. They must be set via environment variables.
 
@@ -105,7 +113,7 @@ Implements `MemoryProvider` ABC in `provider.py`.
 - `handle_tool_call(name, args) → str` (returns JSON string)
 - `system_prompt_block() → str`
 - `prefetch(query, *, session_id="") → str` — cached hits from `queue_prefetch`, else a search; each hit is labelled `title (path): snippet`
-- `queue_prefetch(query, *, session_id="")` — daemon thread; caches results per `(session_id, query)` for the next turn
+- `queue_prefetch(query, *, session_id="")` — daemon thread; captures client/scope and caches by `(session_id, search_scope, workspace, project, query)`; initialization/session switches discard stale results
 - `recall_status() → RecallStatus | None` — hit count of the last `prefetch`, `None` when it injected nothing
 - `sync_turn(user, assistant, *, session_id="", **kwargs)` — daemon thread
 - `on_session_end(messages, **kwargs)` — daemon thread; sends the session id, never the transcript

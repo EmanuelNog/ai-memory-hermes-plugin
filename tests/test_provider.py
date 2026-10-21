@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -11,7 +12,7 @@ from provider import AiMemoryProvider
 
 
 @pytest.fixture
-def provider() -> AiMemoryProvider:
+def provider(monkeypatch: pytest.MonkeyPatch) -> AiMemoryProvider:
     cfg = AiMemoryConfig(
         server_url="http://localhost:49374",
         auth_token="test-token",
@@ -23,6 +24,7 @@ def provider() -> AiMemoryProvider:
     # network (a real ai-memory may well be listening on :49374).
     p._client = MagicMock()
     p._client.fetch_handoff.return_value = None
+    monkeypatch.setattr("provider.AiMemoryClient", lambda *args, **kwargs: p._client)
     return p
 
 
@@ -244,7 +246,10 @@ def test_on_memory_write_skips_other_actions(provider: AiMemoryProvider) -> None
     provider._client.write_page.assert_not_called()
 
 
-def test_queue_prefetch_fills_the_next_prefetch(provider: AiMemoryProvider) -> None:
+def test_queue_prefetch_fills_the_next_prefetch(
+    provider: AiMemoryProvider,
+    wait_for_prefetch: Callable[[AiMemoryProvider, str, str], None],
+) -> None:
     """Hermes calls ``queue_prefetch(query, session_id=...)`` after each turn.
 
     Regression: the old signature took only ``query``, so the manager's
@@ -255,7 +260,7 @@ def test_queue_prefetch_fills_the_next_prefetch(provider: AiMemoryProvider) -> N
         return_value=[{"path": "concepts/x.md", "title": "X", "snippet": "cached body"}]
     )
     provider.queue_prefetch("test query", session_id="sess-9")
-    time.sleep(0.05)
+    wait_for_prefetch(provider, "test query", "sess-9")
     provider._client.search.assert_called_once_with(query="test query", limit=3)
 
     provider._search = MagicMock(side_effect=AssertionError("cache miss"))
@@ -264,11 +269,14 @@ def test_queue_prefetch_fills_the_next_prefetch(provider: AiMemoryProvider) -> N
     provider._search.assert_not_called()
 
 
-def test_prefetch_is_not_shared_between_sessions(provider: AiMemoryProvider) -> None:
+def test_prefetch_is_not_shared_between_sessions(
+    provider: AiMemoryProvider,
+    wait_for_prefetch: Callable[[AiMemoryProvider, str, str], None],
+) -> None:
     """Results are cached per ``(session_id, query)``, never across sessions."""
     provider._client.search = MagicMock(return_value=[{"snippet": "sess-9 body"}])
     provider.queue_prefetch("same query", session_id="sess-9")
-    time.sleep(0.05)
+    wait_for_prefetch(provider, "same query", "sess-9")
     provider._search = MagicMock(return_value={"ok": True, "results": [{"snippet": "sess-1 body"}]})
     assert "sess-1 body" in provider.prefetch("same query", session_id="sess-1")
     provider._search.assert_called_once()
