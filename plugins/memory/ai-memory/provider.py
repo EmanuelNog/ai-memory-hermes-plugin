@@ -172,7 +172,10 @@ class AiMemoryProvider(MemoryProvider):
             return
         try:
             handoff = context.client.fetch_handoff(
-                agent="hermes", workspace=context.workspace, project=context.project
+                agent="hermes",
+                cwd=context.cwd,
+                workspace=context.workspace,
+                project=context.project,
             )
             with self._lock:
                 if context.generation == self._generation:

@@ -10,6 +10,7 @@ from config import (
     explicit_scope_keys,
     get_config_schema,
     load_config,
+    marker_briefing,
     marker_scope,
     save_config,
 )
@@ -279,3 +280,84 @@ def test_marker_scope_ignores_single_quoted_values(tmp_path: Path) -> None:
 def test_marker_scope_is_empty_without_cwd_or_marker(tmp_path: Path) -> None:
     assert marker_scope("") == {}
     assert marker_scope(str(tmp_path)) == {}
+
+
+def _briefing_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+) -> tuple[Path, Path]:
+    """A repository under a fake ``$HOME`` so the walk never reads the real one."""
+    home = tmp_path / "home"
+    repo = home / "repo"
+    nested = repo / "src"
+    nested.mkdir(parents=True)
+    (repo / ".ai-memory.toml").write_text(marker, encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return repo, nested
+
+
+def test_marker_briefing_reads_quoted_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, nested = _briefing_repo(
+        tmp_path,
+        monkeypatch,
+        '[briefing]\ninject_on_session_start = "true"\nmax_chars = 6000\n',
+    )
+    assert marker_briefing(str(nested)) == {
+        "inject_on_session_start": "true",
+        "max_chars": "6000",
+    }
+
+
+def test_marker_briefing_accepts_bare_flags_and_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Section-style flags may be bare, like the official hook clients read them."""
+    _, nested = _briefing_repo(
+        tmp_path,
+        monkeypatch,
+        '\ufeff[briefing]\ninject_on_session_start = yes  # opt in\nmax_chars = "5000"\n',
+    )
+    assert marker_briefing(str(nested)) == {
+        "inject_on_session_start": "yes",
+        "max_chars": "5000",
+    }
+
+
+def test_marker_briefing_skips_a_capture_only_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, nested = _briefing_repo(
+        tmp_path,
+        monkeypatch,
+        "[briefing]\ninject_on_session_start = true\n",
+    )
+    (nested / ".ai-memory.toml").write_text('[capture]\nignore_paths = ["secret/**"]\n')
+    assert marker_briefing(str(nested)) == {
+        "inject_on_session_start": "true",
+        "max_chars": "",
+    }
+
+
+def test_marker_briefing_stops_at_a_settings_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A nearer marker that declares settings ends the walk, opt-in or not."""
+    _, nested = _briefing_repo(
+        tmp_path,
+        monkeypatch,
+        "[briefing]\ninject_on_session_start = true\n",
+    )
+    (nested / ".ai-memory.toml").write_text('workspace = "inner"\n')
+    assert marker_briefing(str(nested)) == {"inject_on_session_start": "", "max_chars": ""}
+
+
+def test_marker_briefing_is_empty_without_cwd_or_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    empty = home / "empty"
+    empty.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    assert marker_briefing("") == {}
+    assert marker_briefing(str(empty)) == {}
