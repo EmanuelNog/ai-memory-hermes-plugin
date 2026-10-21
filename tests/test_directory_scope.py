@@ -194,7 +194,7 @@ def test_nearest_toml_routes_search_writes_handoff_and_hooks(
     cwd = str(monorepo / directory)
     provider.initialize("session", cwd=cwd, hermes_home=str(home), agent_workspace="hermes")
     assert dict(requests[-1].url.params) == {
-        "agent": "hermes", "workspace": workspace, "project": project,
+        "agent": "hermes", "cwd": cwd, "workspace": workspace, "project": project,
     }
     assert provider._search({"query": "private"})["ok"]
     assert dict(requests[-1].url.params) == {

@@ -330,6 +330,26 @@ def test_initialize_project_kwarg_overrides_profile(provider: AiMemoryProvider) 
     assert provider._config.project == "custom-proj"
 
 
+def test_initialize_passes_session_cwd_to_handoff(
+    provider: AiMemoryProvider, tmp_path: Path
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    provider.initialize(
+        "sess-1",
+        cwd=str(repo),
+        profile="test-profile",
+        ai_memory_workspace="ws-custom",
+        project="custom-proj",
+    )
+    provider._client.fetch_handoff.assert_called_once_with(
+        agent="hermes",
+        cwd=str(repo),
+        workspace="ws-custom",
+        project="custom-proj",
+    )
+
+
 def test_initialize_preserves_default_workspace(provider: AiMemoryProvider) -> None:
     provider.initialize("sess-1", agent_identity="test-profile")
     assert provider._config.workspace == "hermes"

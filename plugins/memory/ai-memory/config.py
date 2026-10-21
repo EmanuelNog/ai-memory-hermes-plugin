@@ -223,6 +223,67 @@ def _parse_marker_key(text: str, key: str) -> str:
     return ""
 
 
+def _parse_marker_flag(text: str, key: str) -> str:
+    """Line-based ``key = true`` reader, accepting quoted or bare values.
+
+    Mirrors ai-memory's ``parse_flag_in``: section headers are ignored, the
+    first match wins, an optional trailing ``# comment`` is stripped, and the
+    surrounding double quotes are removed. Used for ``[briefing]`` and the
+    other section-style flags, which the strict key reader above rejects.
+    """
+    for line in text.splitlines():
+        trimmed = line.lstrip("\ufeff").lstrip()
+        if not trimmed.startswith(key):
+            continue
+        rest = trimmed[len(key) :].lstrip()
+        if not rest.startswith("="):
+            continue
+        value = rest[1:].split("#", 1)[0].strip().strip('"')
+        if value:
+            return value
+    return ""
+
+
+_MARKER_QUOTED_SETTINGS: tuple[str, ...] = (
+    "workspace",
+    "project",
+    "project_strategy",
+    "drop_subagent_captures",
+    "identity",
+    "identity_style",
+)
+_MARKER_FLAG_SETTINGS: tuple[str, ...] = (
+    "default_global",
+    "inject_on_session_start",
+    "max_chars",
+    "contribute",
+    "consume",
+)
+
+
+def _marker_declares_settings(text: str) -> bool:
+    """Whether a marker declares anything beyond a ``[capture]`` section.
+
+    Mirrors ai-memory's ``declares_more_than_capture``: only a marker whose
+    sole content is ``[capture]`` is transparent to the settings walk. The
+    check is deliberately conservative - a stray key anywhere turns a marker
+    into a boundary, never the other way round.
+    """
+    if any(_parse_marker_key(text, key) for key in _MARKER_QUOTED_SETTINGS):
+        return True
+    if any(_parse_marker_flag(text, key) for key in _MARKER_FLAG_SETTINGS):
+        return True
+    if _parse_marker_flag(text, "server"):
+        return True
+    for line in text.splitlines():
+        trimmed = line.lstrip("\ufeff").lstrip()
+        if trimmed.startswith("aliases") and trimmed[len("aliases") :].lstrip().startswith("="):
+            return True
+        if trimmed.startswith(("[routes", "routes", "route_")):
+            return True
+    return False
+
+
 def validated_directory(cwd: str) -> Path | None:
     """Native absolute existing directory, never anchored to the process cwd.
 
@@ -265,6 +326,40 @@ def marker_scope(cwd: str) -> dict[str, str]:
             }
             if scope:
                 return scope
+        if directory == home or directory.parent == directory:
+            return {}
+        directory = directory.parent
+
+
+def marker_briefing(cwd: str) -> dict[str, str]:
+    """``[briefing]`` flags declared by the nearest settings marker.
+
+    Walks up from *cwd* like the hook clients: a marker whose only content is
+    ``[capture]`` is transparent and the walk continues, while the first
+    marker that declares any setting is the resolution boundary - even when
+    it does not opt into the brief, so an outer marker cannot leak through.
+    Stops at ``$HOME`` or the filesystem root. Returns ``{}`` when *cwd* is
+    empty or no settings marker exists.
+    """
+    directory = validated_directory(cwd)
+    if directory is None:
+        return {}
+
+    home = Path.home().absolute()
+    while True:
+        candidate = directory / _MARKER_FILENAME
+        if candidate.is_file():
+            try:
+                text = candidate.read_text()
+            except OSError:
+                text = ""
+            if _marker_declares_settings(text):
+                return {
+                    "inject_on_session_start": _parse_marker_flag(
+                        text, "inject_on_session_start"
+                    ),
+                    "max_chars": _parse_marker_flag(text, "max_chars"),
+                }
         if directory == home or directory.parent == directory:
             return {}
         directory = directory.parent
