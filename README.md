@@ -350,3 +350,27 @@ More detailed deployment instructions in [docs/guide.md](docs/guide.md#deploymen
 - [docs/guide.md](docs/guide.md) — usage guide
 - [docs/reference.md](docs/reference.md) — full API reference
 - [docs/common-problems.md](docs/common-problems.md) — troubleshooting
+- [CHANGELOG.md](CHANGELOG.md) — version history
+
+## Project Info
+
+- **Version:** 0.1.0
+- **Branch:** `main`
+- **Remotes:**
+  - `origin` — https://github.com/EmanuelNog/ai-memory-hermes-plugin.git (this fork)
+  - `upstream` — https://github.com/MrLuciano/ai-memory-hermes-plugin.git (kept in sync via the normal git merge flow)
+
+Manual install from a repo clone (equivalent to what `scripts/install.sh` does):
+
+```bash
+# Install plugin
+mkdir -p "$HERMES_HOME/plugins/ai-memory"
+cp -r plugins/memory/ai-memory/* "$HERMES_HOME/plugins/ai-memory/"
+
+# Enable
+hermes plugins enable ai-memory
+hermes memory setup
+
+# Verify
+hermes memory status
+```
