@@ -10,6 +10,7 @@
   sessions).
 - `on_session_switch` — rebinds the provider's session id when Hermes
   rotates it on compression / `/resume` / `/branch` / `/new`.
+- Session-start handoff now forwards the repository marker's `[briefing] inject_on_session_start` opt-in (and optional `max_chars` budget) as `briefing` / `briefing_budget`, so Hermes receives the compiled project brief the official hook clients already get. `config.marker_briefing()` walks from the session `cwd` through capture-only markers and stops at the nearest settings marker, matching ai-memory's own resolution; the provider now passes `cwd` on the handoff fetch. Off unless the repository opts in.
 - Optional `search_scope=project` / `AI_MEMORY_SEARCH_SCOPE=project` restricts tools and both recall paths to the resolved workspace/project; global recall remains the default.
 - `AiMemoryProvider.scope_diagnostics()` and initialization logs expose local directory/scope state without network calls, credentials, or memory contents.
 - `.ai-memory.toml` scope resolution — `config.marker_scope()` walks up from the session's `cwd` (stopping at `$HOME` or the filesystem root) and reads `workspace`/`project` with ai-memory's own line-based parser; a marker that pins no scope key is skipped, matching the server's walk-up.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest.mock import ANY, MagicMock
 
 import httpx
@@ -149,6 +150,80 @@ def test_client_fetch_handoff_raises_on_500(client: AiMemoryClient) -> None:
     client._transport = httpx.MockTransport(handler)
     with pytest.raises(httpx.HTTPStatusError):
         client.fetch_handoff()
+
+
+def _briefing_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: str
+) -> Path:
+    home = tmp_path / "home"
+    repo = home / "repo"
+    repo.mkdir(parents=True)
+    (repo / ".ai-memory.toml").write_text(marker, encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    return repo
+
+
+def test_client_fetch_handoff_forwards_briefing_opt_in(
+    client: AiMemoryClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _briefing_repo(
+        tmp_path,
+        monkeypatch,
+        "[briefing]\ninject_on_session_start = true\nmax_chars = 6000\n",
+    )
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, text="brief")
+
+    client._transport = httpx.MockTransport(handler)
+    result = client.fetch_handoff(
+        cwd=str(repo), workspace="custom-ws", project="custom-proj"
+    )
+    assert result == "brief"
+    assert seen == {
+        "agent": "hermes",
+        "cwd": str(repo),
+        "briefing": "true",
+        "briefing_budget": "6000",
+        "workspace": "custom-ws",
+        "project": "custom-proj",
+    }
+
+
+def test_client_fetch_handoff_omits_briefing_without_opt_in(
+    client: AiMemoryClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _briefing_repo(tmp_path, monkeypatch, 'workspace = "acme"\n')
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, text="handoff")
+
+    client._transport = httpx.MockTransport(handler)
+    client.fetch_handoff(cwd=str(repo))
+    assert seen["cwd"] == str(repo)
+    assert "briefing" not in seen
+    assert "briefing_budget" not in seen
+
+
+def test_client_fetch_handoff_treats_falsy_opt_in_as_absent(
+    client: AiMemoryClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _briefing_repo(
+        tmp_path, monkeypatch, '[briefing]\ninject_on_session_start = "off"\n'
+    )
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, text="handoff")
+
+    client._transport = httpx.MockTransport(handler)
+    client.fetch_handoff(cwd=str(repo))
+    assert "briefing" not in seen
 
 
 def test_client_no_auth_header_when_no_token() -> None:

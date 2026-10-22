@@ -14,7 +14,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from config import AiMemoryConfig  # noqa: E402
+from config import AiMemoryConfig, marker_briefing  # noqa: E402
 
 log = logging.getLogger("ai-memory")
 
@@ -215,6 +215,14 @@ class AiMemoryClient:
         params: dict[str, str] = {"agent": agent}
         if cwd:
             params["cwd"] = cwd
+            briefing = marker_briefing(cwd)
+            if briefing.get("inject_on_session_start", "").lower() in ("1", "true", "yes", "on"):
+                # ai-memory only appends the project brief (pinned/_rules_/
+                # _slots_ pages) when the client forwards the marker's opt-in;
+                # the hook clients do, this provider predates it.
+                params["briefing"] = briefing["inject_on_session_start"]
+                if briefing.get("max_chars"):
+                    params["briefing_budget"] = briefing["max_chars"]
         if workspace:
             params["workspace"] = workspace
         if project:
