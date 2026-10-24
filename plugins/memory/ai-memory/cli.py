@@ -17,7 +17,7 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 from client import AiMemoryClient  # noqa: E402
-from config import _secret_keys, load_config, save_config  # noqa: E402
+from aimemory_config import _secret_keys, load_config, save_config  # noqa: E402
 
 PLUGIN_DIR = Path(__file__).resolve().parent
 REPO_TARBALL_URL = (

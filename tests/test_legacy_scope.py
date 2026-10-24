@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx
 import pytest
 from cli import cmd_config, cmd_config_set
-from config import AiMemoryConfig, explicit_scope_keys, get_config_schema, load_config, save_config
+from aimemory_config import AiMemoryConfig, explicit_scope_keys, get_config_schema, load_config, save_config
 from provider import AiMemoryProvider
 
 

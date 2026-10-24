@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 from client import SESSION_END_TIMEOUT, AiMemoryClient
-from config import AiMemoryConfig
+from aimemory_config import AiMemoryConfig
 from provider import AiMemoryProvider
 
 

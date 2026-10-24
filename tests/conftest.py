@@ -20,7 +20,7 @@ sys.path.insert(
 )
 
 from client import AiMemoryClient
-from config import AiMemoryConfig
+from aimemory_config import AiMemoryConfig
 from provider import AiMemoryProvider
 
 

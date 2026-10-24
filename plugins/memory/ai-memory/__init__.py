@@ -11,7 +11,7 @@ if _init_dir not in sys.path:
 # Hermes loads __init__.py as a standalone module (not a package), so
 # relative imports (from .foo import Bar) fail. Bare imports + sys.path
 # ensure sibling modules are found regardless of how the plugin is loaded.
-from config import load_config  # noqa: E402
+from aimemory_config import load_config  # noqa: E402
 from provider import AiMemoryProvider  # noqa: E402
 
 __all__ = ["register"]

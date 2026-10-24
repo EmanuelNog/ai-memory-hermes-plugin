@@ -15,7 +15,7 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
 from client import SESSION_END_TIMEOUT, AiMemoryClient  # noqa: E402
-from config import (  # noqa: E402
+from aimemory_config import (  # noqa: E402
     AiMemoryConfig,
     explicit_scope_keys,
     get_config_schema,

@@ -13,7 +13,7 @@ from client import (
     SESSION_END_TIMEOUT,
     AiMemoryClient,
 )
-from config import AiMemoryConfig
+from aimemory_config import AiMemoryConfig
 
 
 @pytest.fixture

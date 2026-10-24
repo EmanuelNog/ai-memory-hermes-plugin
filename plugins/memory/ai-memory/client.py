@@ -14,7 +14,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from config import AiMemoryConfig, marker_briefing  # noqa: E402
+from aimemory_config import AiMemoryConfig, marker_briefing  # noqa: E402
 
 log = logging.getLogger("ai-memory")
 

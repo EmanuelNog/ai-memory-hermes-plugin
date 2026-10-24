@@ -68,7 +68,7 @@ Hermes Agent → MemoryProvider ABC → AiMemoryProvider → AiMemoryClient → 
 | `__init__.py` | Entry point | `register()` — loads config, creates provider, calls `ctx.register_memory_provider()` |
 | `provider.py` | AiMemoryProvider | Implements `MemoryProvider` ABC; lifecycle hooks, tool dispatch |
 | `client.py` | AiMemoryClient | Typed HTTP wrapper; search, write page, send hook, fetch handoff |
-| `config.py` | AiMemoryConfig | Config dataclass + JSON persistence + env-var fallback + secret filtering |
+| `aimemory_config.py` | AiMemoryConfig | Config dataclass + JSON persistence + env-var fallback + secret filtering |
 | `cli.py` | CLI | `status`/`config`/`link` subcommands for `hermes memory` |
 | `plugin.yaml` | Manifest | Metadata + `python_dependencies` (Hermes validates but never installs) |
 
@@ -187,7 +187,7 @@ plugins/memory/ai-memory/
 ├── plugin.yaml       # Hermes manifest
 ├── provider.py       # AiMemoryProvider
 ├── client.py         # AiMemoryClient (httpx)
-├── config.py         # AiMemoryConfig + persistence
+├── aimemory_config.py # AiMemoryConfig + persistence
 ├── cli.py            # CLI subcommands
 └── README.md         # In-plugin readme
 tests/

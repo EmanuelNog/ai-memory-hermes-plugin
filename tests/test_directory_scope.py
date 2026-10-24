@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 import pytest
 from client import AiMemoryClient
-from config import AiMemoryConfig, get_config_schema, load_config, save_config
+from aimemory_config import AiMemoryConfig, get_config_schema, load_config, save_config
 from provider import AiMemoryProvider
 
 

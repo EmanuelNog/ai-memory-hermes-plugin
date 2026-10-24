@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from config import AiMemoryConfig, marker_scope
+from aimemory_config import AiMemoryConfig, marker_scope
 from provider import AiMemoryProvider
 
 

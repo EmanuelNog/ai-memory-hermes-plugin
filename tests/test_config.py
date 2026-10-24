@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from config import (
+from aimemory_config import (
     AiMemoryConfig,
     _secret_keys,
     explicit_scope_keys,
