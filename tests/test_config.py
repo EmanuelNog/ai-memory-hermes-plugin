@@ -361,3 +361,20 @@ def test_marker_briefing_is_empty_without_cwd_or_marker(
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
     assert marker_briefing("") == {}
     assert marker_briefing(str(empty)) == {}
+
+
+def test_memory_mirror_is_off_by_default(tmp_path: Path) -> None:
+    """Hermes memory is the single home for those facts; the wiki copy went
+    stale and contradicted the injected memory block (audit defect 6)."""
+    assert AiMemoryConfig().mirror_memory is False
+    assert load_config(str(tmp_path)).mirror_memory is False
+
+
+def test_memory_mirror_can_be_enabled(tmp_path: Path) -> None:
+    save_config({"mirror_memory": True}, str(tmp_path))
+    assert load_config(str(tmp_path)).mirror_memory is True
+
+
+def test_memory_mirror_accepts_a_string_flag(tmp_path: Path) -> None:
+    (tmp_path / "ai-memory.json").write_text(json.dumps({"mirror_memory": "true"}))
+    assert load_config(str(tmp_path)).mirror_memory is True

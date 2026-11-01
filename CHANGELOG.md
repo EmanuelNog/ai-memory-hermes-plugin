@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **One page per fact.** `write_page()` normalises the path (`normalise_page_path()`:
+  drop `./` and a leading `/`, collapse `//`, force `.md`), because ai-memory keys
+  a page by its literal path and `_rules/x` vs `_rules/x.md` were both `is_latest=1`
+  with different bodies — a write with the other form never superseded anything.
+- **A write you can trust.** `write_page()` reads the page back and reports
+  `verified` / `unchanged` / `existed` / `near_duplicate`. A timeout is resolved by
+  the read-back: a landed write returns `recovered_after_timeout` instead of an
+  error, and a lost one retries with the same full payload. A pin already on the
+  page, or declared in the body's frontmatter, survives a write that omits it.
+- **An identical body is a no-op** — the same page written five times in one
+  session no longer creates five versions.
+- **Duplicate detection on write** — a new page whose topic another live page
+  already covers is reported as `near_duplicate` (one search on the body's H1 plus
+  the path words, then a body comparison).
+- **Failures are final, not a retry loop.** Search/write/status return
+  `{"ok": false, "unavailable": true, "retry": false, "error": "…; do not retry"}`,
+  with the HTTP status for a rejected request. An empty `ai_memory_search` query is
+  refused locally instead of being sent. `prefetch()` degrades to no recall.
+
+### Changed
+
+- **Memory mirroring is opt-in** (`mirror_memory`, default `false`,
+  `AI_MEMORY_MIRROR_MEMORY`). The mirrored page carried a superseded section and
+  contradicted the memory block injected into the same prompt; Hermes memory is
+  the single home for those facts.
+- `ai_memory_search` / `ai_memory_write` schemas require a non-empty `query`,
+  `path` and `body` (`minLength: 1`).
+
 ### Added
 
 - `on_pre_compress` — fires a `pre-compact` event at the ai-memory server

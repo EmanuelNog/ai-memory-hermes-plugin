@@ -26,6 +26,7 @@ _ENV_MAP: dict[str, str] = {
     "AI_MEMORY_WORKSPACE": "workspace",
     "AI_MEMORY_PROJECT": "project",
     "AI_MEMORY_SEARCH_SCOPE": "search_scope",
+    "AI_MEMORY_MIRROR_MEMORY": "mirror_memory",
 }
 
 # Scope keys ``.ai-memory.toml`` may pin, in the server's own order.
@@ -41,9 +42,20 @@ class AiMemoryConfig:
     workspace: str = "hermes"
     project: str = "hermes-default"
     search_scope: str = "global"
+    # Mirror Hermes' own MEMORY.md/USER.md writes into the wiki. Off: memory is
+    # already injected every session and a wiki copy of it can only go stale
+    # (audit defect 6 — the mirrored page contradicted the injected block).
+    mirror_memory: bool = False
 
     def __post_init__(self) -> None:
         _validate_search_scope(self.search_scope)
+        self.mirror_memory = _as_bool(self.mirror_memory)
+
+
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _validate_search_scope(value: Any) -> None:
@@ -85,6 +97,15 @@ def get_config_schema() -> list[dict[str, Any]]:
             "description": "Recall scope: global (legacy default) or project",
             "default": "global",
             "choices": ["global", "project"],
+            "required": False,
+        },
+        {
+            "key": "mirror_memory",
+            "description": (
+                "Mirror Hermes MEMORY.md/USER.md writes into the wiki "
+                "(off: memory is injected every session, a wiki copy goes stale)"
+            ),
+            "default": False,
             "required": False,
         },
         {

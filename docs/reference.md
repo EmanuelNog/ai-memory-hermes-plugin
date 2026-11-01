@@ -34,6 +34,10 @@ Only an absolute, existing directory is eligible for marker lookup. Missing, rel
 
 `search_scope=global` preserves legacy global search; `search_scope=project` applies the resolved scope to every provider search/prefetch. An unknown scope in project mode returns an error/empty recall, never global results. Writes, lifecycle capture, mirrors and handoff consumption require a known workspace/project and a primary context in either search mode.
 
+`mirror_memory` (default `false`, or `AI_MEMORY_MIRROR_MEMORY`) mirrors built-in `MEMORY.md`/`USER.md` writes into the wiki. Off by default: Hermes memory is already injected every session, so the wiki copy is a second, staler source of truth.
+
+A failed tool call returns a final answer rather than raising, so the agent does not retry a store that is down: `{"ok": false, "unavailable": true, "retry": false, "error": "ai-memory store unavailable (ConnectError); do not retry — carry on with skills, Hermes memory and session_search."}`. A rejected request (`HTTPStatusError`) reports the status code with `retry: false`; an empty `ai_memory_search` query is refused locally without touching the server.
+
 **No dynamic directory-scope switching:** the memory-provider contract supplies the construction cwd at `initialize()`, not the updated live agent cwd. A new initialized provider with the target directory is required; `on_session_switch()` updates the session ID and invalidates recall, but does not re-resolve cwd. See the [Hermes contract](https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-plugin).
 
 Legacy-generated default pairs are exempt from explicit file precedence only in project mode and only for the narrow format documented in [Legacy scope defaults](../README.md#legacy-scope-defaults-and-explicit-overrides). `scope_origin=explicit` preserves an intentional default pair; saving nonblank scope values records that metadata. Install/update defaults and blank setup answers do not pin projects. UTF-8 files with a BOM (PowerShell 5.1) are supported. Loading never writes migration changes to the profile.
@@ -65,13 +69,41 @@ Typed HTTP wrapper in `client.py`. Accepts `AiMemoryConfig`. Persistent `httpx.C
 
 Returns list of result dicts with keys like `path`, `snippet`, `score`.
 
+#### `read_page(path, workspace=None, project=None) → dict | None`
+
+**HTTP:** `GET /admin/read-page?path=<path>&workspace=<ws>&project=<proj>`  
+**Timeout:** 5s (`READ_TIMEOUT`)  
+**Returns:** the page (`path`, `title`, `body`, `frontmatter`), or `None` on 404
+
+The server requires an explicit `workspace`; a call without one cannot verify
+anything, which is why `write_page` reports `verified: false` for it.
+
 #### `write_page(path, body, tags=None, tier=None, pinned=False, workspace=None, project=None) → dict`
 
-**HTTP:** `POST /admin/write-page`  
-**Timeout:** 10s  
-**Raises:** `httpx.HTTPStatusError` on non-2xx
+**HTTP:** `POST /admin/write-page`, then `GET /admin/read-page` to verify  
+**Timeout:** 10s write, 5s read-back  
+**Raises:** `ValueError` for an empty path, a path that escapes the wiki, or an empty body; `httpx.HTTPStatusError` on non-2xx
 
-Returns `{"ok": true, "path": "..."}` or error dict.
+The path is normalised first (`normalise_page_path()`: strip `./` and a leading
+`/`, collapse `//`, force the `.md` suffix), because ai-memory keys a page by its
+literal path — `_rules/x` and `_rules/x.md` used to be two live pages for one
+fact and never superseded each other.
+
+The returned dict reports what actually happened:
+
+| key | meaning |
+|---|---|
+| `path` | the canonical page path that now exists |
+| `verified` | a read-back returned the body that was written |
+| `unchanged` | the page already held this exact body; nothing was written |
+| `recovered_after_timeout` | the write timed out but landed; the read-back proves it |
+| `existed` / `previous_chars` / `previous_body_excerpt` | the page was replaced (a new version) |
+| `near_duplicate` | another live page already covers this topic |
+
+A timeout is resolved by reading the page back: if the body matches, the write
+is reported as landed instead of raising; if it did not land, the whole payload
+is retried once — never a partial one. A pin already on the page, or declared in
+the body's YAML frontmatter, is sent even when the caller does not mention it.
 
 #### `status() → dict`
 
@@ -117,7 +149,7 @@ Implements `MemoryProvider` ABC in `provider.py`.
 - `recall_status() → RecallStatus | None` — hit count of the last `prefetch`, `None` when it injected nothing
 - `sync_turn(user, assistant, *, session_id="", **kwargs)` — daemon thread
 - `on_session_end(messages, **kwargs)` — daemon thread; sends the session id, never the transcript
-- `on_memory_write(action, target, content, metadata=None)` — mirrors `add` / `replace`; `remove` is skipped
+- `on_memory_write(action, target, content, metadata=None)` — mirrors `add` / `replace` only when `mirror_memory` is on (default off); `remove` is skipped
 - `shutdown()`
 
 ## CLI (`register_cli`)

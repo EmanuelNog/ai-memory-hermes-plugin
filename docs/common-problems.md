@@ -265,7 +265,9 @@ curl "http://127.0.0.1:49374/admin/search?q=test"
 
 ### Memory Not Mirroring
 
-**Cause:** The mirrored actions are `add` and `replace` — what Hermes announces for a built-in `MEMORY.md` / `USER.md` write. `write` and `append` are still accepted as synonyms for older callers.
+**Cause (1, expected):** mirroring is off by default. Hermes memory is injected into every session, so the mirrored page was a second, staler source of truth and could contradict the memory block in the same prompt. Turn it on with `mirror_memory: true` (or `AI_MEMORY_MIRROR_MEMORY=true`).
+
+**Cause (2):** with it on, the mirrored actions are `add` and `replace` — what Hermes announces for a built-in `MEMORY.md` / `USER.md` write. `write` and `append` are still accepted as synonyms for older callers.
 
 `remove` is skipped on purpose: the native store owns the deletion, and the mirror keeps the page history instead of writing a tombstone. A `replace` carries the superseded entry in `metadata["previous_content"]` and the page keeps it under `## Substituído`.
 

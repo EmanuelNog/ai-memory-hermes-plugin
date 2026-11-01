@@ -12,6 +12,16 @@ from aimemory_config import AiMemoryConfig, get_config_schema, load_config, save
 from provider import AiMemoryProvider
 
 
+def write_payloads(requests: list[httpx.Request]) -> list[dict[str, Any]]:
+    """The write POSTs, in order: a write now also reads the page back."""
+    return [
+        json.loads(request.content)
+        for request in requests
+        if request.url.path == "/admin/write-page"
+    ]
+
+
+
 @pytest.fixture
 def http_provider(
     monkeypatch: pytest.MonkeyPatch,
@@ -150,7 +160,7 @@ def test_explicit_default_project_allows_writes_without_cwd(
         kwargs["project"] = "hermes-default"
     provider.initialize("explicit", **kwargs)
     assert provider._write({"path": "note.md", "body": "allowed"})["ok"]
-    payload = json.loads(requests[-1].content)
+    payload = write_payloads(requests)[-1]
     assert payload["project"] == "hermes-default"
     assert payload["workspace"] == "hermes"
 
@@ -202,8 +212,7 @@ def test_nearest_toml_routes_search_writes_handoff_and_hooks(
     }
     provider._write({"path": "note.md", "body": "test"})
     provider.on_memory_write("add", "memory", "test")
-    for request in requests[-2:]:
-        body = json.loads(request.content)
+    for body in write_payloads(requests):
         assert (body["workspace"], body["project"]) == (workspace, project)
     provider.sync_turn("test prompt", "test answer")
     provider.on_session_end([])
@@ -240,7 +249,7 @@ def test_explicit_scope_overrides_nested_toml(
     assert requests[-1].url.params["workspace"] == "override-ws"
     assert requests[-1].url.params["project"] == "override-project"
     provider._write({"path": "note.md", "body": "allowed"})
-    assert json.loads(requests[-1].content)["project"] == "override-project"
+    assert write_payloads(requests)[-1]["project"] == "override-project"
 
 
 def test_project_search_does_not_fall_back_to_global_when_scope_is_unknown(
@@ -362,7 +371,7 @@ def test_session_switch_discards_late_cache_without_dynamic_scope_change(
     assert not provider._prefetch_cache
     assert provider._config.project == "imperio_2026"
     provider._write({"path": "note.md", "body": "same construction scope"})
-    assert json.loads(requests[-1].content)["project"] == "imperio_2026"
+    assert write_payloads(requests)[-1]["project"] == "imperio_2026"
 
 
 def test_failed_reinitialize_cannot_write_to_previous_project(

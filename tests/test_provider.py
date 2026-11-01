@@ -3,12 +3,20 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from aimemory_config import AiMemoryConfig
 from provider import AiMemoryProvider
+
+
+@pytest.fixture
+def mirror_provider(provider: AiMemoryProvider) -> AiMemoryProvider:
+    """The MEMORY.md mirror, switched on explicitly (off by default)."""
+    provider._config = replace(provider._config, mirror_memory=True)
+    return provider
 
 
 @pytest.fixture
@@ -228,22 +236,37 @@ def test_on_session_end_absorbs_extra_kwargs(provider: AiMemoryProvider) -> None
     provider._client.send_hook.assert_called_once()
 
 
-def test_on_memory_write_calls_client(provider: AiMemoryProvider) -> None:
+def test_memory_is_not_mirrored_into_the_wiki_by_default(provider: AiMemoryProvider) -> None:
+    """Hermes memory is injected every session; a wiki copy can only go stale.
+
+    The mirrored page carried a superseded section and contradicted the memory
+    block injected into the same prompt (audit defect 6), so mirroring is
+    opt-in — one home per fact.
+    """
     provider._client.write_page = MagicMock()
-    provider.on_memory_write("write", "notes/foo", "# content")
-    provider._client.write_page.assert_called_once()
-
-
-def test_on_memory_write_with_metadata(provider: AiMemoryProvider) -> None:
-    provider._client.write_page = MagicMock()
-    provider.on_memory_write("write", "notes/foo", "# content", metadata={"tags": ["test"]})
-    provider._client.write_page.assert_called_once()
-
-
-def test_on_memory_write_skips_other_actions(provider: AiMemoryProvider) -> None:
-    provider._client.write_page = MagicMock()
-    provider.on_memory_write("delete", "notes/foo", "# content")
+    provider.on_memory_write("add", "memory", "# entry")
+    provider.on_memory_write("replace", "user", "# novo", metadata={"previous_content": "# antigo"})
     provider._client.write_page.assert_not_called()
+
+
+def test_memory_mirror_writes_when_enabled(mirror_provider: AiMemoryProvider) -> None:
+    mirror_provider._client.write_page = MagicMock()
+    mirror_provider.on_memory_write("write", "notes/foo", "# content")
+    mirror_provider._client.write_page.assert_called_once()
+
+
+def test_memory_mirror_with_metadata_when_enabled(mirror_provider: AiMemoryProvider) -> None:
+    mirror_provider._client.write_page = MagicMock()
+    mirror_provider.on_memory_write(
+        "write", "notes/foo", "# content", metadata={"tags": ["test"]}
+    )
+    mirror_provider._client.write_page.assert_called_once()
+
+
+def test_on_memory_write_skips_other_actions(mirror_provider: AiMemoryProvider) -> None:
+    mirror_provider._client.write_page = MagicMock()
+    mirror_provider.on_memory_write("delete", "notes/foo", "# content")
+    mirror_provider._client.write_page.assert_not_called()
 
 
 def test_queue_prefetch_fills_the_next_prefetch(
@@ -326,30 +349,34 @@ def test_search_schema_declares_its_required_argument(provider: AiMemoryProvider
     assert "query" in schema["parameters"]["properties"]
 
 
-def test_on_memory_write_mirrors_add(provider: AiMemoryProvider) -> None:
+def test_on_memory_write_mirrors_add(mirror_provider: AiMemoryProvider) -> None:
     """Hermes announces built-in writes as add|replace|remove."""
-    provider._client.write_page = MagicMock()
-    provider.on_memory_write("add", "memory", "# entry")
-    kwargs = provider._client.write_page.call_args.kwargs
+    mirror_provider._client.write_page = MagicMock()
+    mirror_provider.on_memory_write("add", "memory", "# entry")
+    kwargs = mirror_provider._client.write_page.call_args.kwargs
     assert kwargs["path"] == "hermes-memory/memory.md"
     assert kwargs["body"] == "# entry"
     assert kwargs["tags"] == ["hermes", "mirror"]
 
 
-def test_on_memory_write_replace_keeps_previous_content(provider: AiMemoryProvider) -> None:
-    provider._client.write_page = MagicMock()
-    provider.on_memory_write("replace", "user", "# novo", metadata={"previous_content": "# antigo"})
-    assert provider._client.write_page.call_args.kwargs["path"] == "hermes-memory/user.md"
-    body = provider._client.write_page.call_args.kwargs["body"]
+def test_on_memory_write_replace_keeps_previous_content(mirror_provider: AiMemoryProvider) -> None:
+    mirror_provider._client.write_page = MagicMock()
+    mirror_provider.on_memory_write(
+        "replace", "user", "# novo", metadata={"previous_content": "# antigo"}
+    )
+    assert mirror_provider._client.write_page.call_args.kwargs["path"] == "hermes-memory/user.md"
+    body = mirror_provider._client.write_page.call_args.kwargs["body"]
     assert "# novo" in body
     assert "# antigo" in body
 
 
-def test_on_memory_write_skips_remove(provider: AiMemoryProvider) -> None:
+def test_on_memory_write_skips_remove(mirror_provider: AiMemoryProvider) -> None:
     """The mirror keeps page history; a delete gets no tombstone."""
-    provider._client.write_page = MagicMock()
-    provider.on_memory_write("remove", "memory", "# entry", metadata={"old_text": "# entry"})
-    provider._client.write_page.assert_not_called()
+    mirror_provider._client.write_page = MagicMock()
+    mirror_provider.on_memory_write(
+        "remove", "memory", "# entry", metadata={"old_text": "# entry"}
+    )
+    mirror_provider._client.write_page.assert_not_called()
 
 
 def test_unavailable_reason_when_server_url_missing() -> None:
@@ -405,16 +432,25 @@ def test_initialize_uses_identity_when_no_configured_project(
     assert provider._config.project == "hermes-custom-profile"
 
 
-def test_prefetch_propagates_search_errors(provider: AiMemoryProvider) -> None:
+def test_prefetch_degrades_quietly_when_the_store_fails(provider: AiMemoryProvider) -> None:
+    """A failed recall must not raise: the turn continues without wiki context.
+
+    Raising is what made the agent retry 37 connection-refused calls (audit
+    defect 8) instead of treating the store as absent for the turn.
+    """
     provider._client.search = MagicMock(side_effect=RuntimeError("search failed"))
-    with pytest.raises(RuntimeError, match="search failed"):
-        provider.prefetch("test query")
+    assert provider.prefetch("test query") == ""
+    assert provider.recall_status() is None
 
 
-def test_handle_tool_call_propagates_errors(provider: AiMemoryProvider) -> None:
+def test_handle_tool_call_reports_unavailability_instead_of_raising(
+    provider: AiMemoryProvider,
+) -> None:
     provider._client.search = MagicMock(side_effect=RuntimeError("search failed"))
-    with pytest.raises(RuntimeError):
-        provider.handle_tool_call("ai_memory_search", {"query": "test"})
+    result = json.loads(provider.handle_tool_call("ai_memory_search", {"query": "test"}))
+    assert result["ok"] is False
+    assert result["unavailable"] is True
+    assert result["retry"] is False
 
 
 def test_on_pre_compress_sends_pre_compact_hook(provider: AiMemoryProvider) -> None:

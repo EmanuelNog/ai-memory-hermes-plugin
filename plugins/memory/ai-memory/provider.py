@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 # Ensure sibling modules are findable when this file is loaded standalone
 # (Hermes pre-loads submodules before executing __init__.py).
 _PLUGIN_DIR = str(Path(__file__).resolve().parent)
@@ -277,11 +279,19 @@ class AiMemoryProvider(MemoryProvider):
         return [
             {
                 "name": "ai_memory_search",
-                "description": "Search the ai-memory wiki for relevant context",
+                "description": (
+                    "Search the ai-memory wiki for relevant context. The query must be "
+                    "non-empty; if the store reports itself unavailable, do not retry — "
+                    "carry on with skills, Hermes memory and session_search."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "query": {"type": "string", "description": "Search query"},
+                        "query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Search query (required, non-empty)",
+                        },
                         "max_results": {"type": "integer", "default": 5},
                     },
                     "required": ["query"],
@@ -289,12 +299,20 @@ class AiMemoryProvider(MemoryProvider):
             },
             {
                 "name": "ai_memory_write",
-                "description": "Write a new page to the ai-memory wiki",
+                "description": (
+                    "Write or update one page in the ai-memory wiki. The page at `path` "
+                    "is updated in place when it already exists, so read it first and "
+                    "merge instead of writing the same fact again."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "path": {"type": "string", "description": "Wiki page path"},
-                        "body": {"type": "string", "description": "Markdown body"},
+                        "path": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Wiki page path, e.g. gotchas/x.md",
+                        },
+                        "body": {"type": "string", "minLength": 1, "description": "Markdown body"},
                         "tags": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["path", "body"],
@@ -528,12 +546,19 @@ class AiMemoryProvider(MemoryProvider):
     ) -> None:
         """Mirror a built-in `MEMORY.md` / `USER.md` write into the wiki.
 
-        ``remove`` is the native store deleting an entry it owns: the mirror
-        keeps the page history instead of writing a tombstone, so it is
-        skipped. A ``replace`` carries the superseded entry in
-        ``metadata["previous_content"]``, which is kept in the mirrored page so
-        the replacement does not silently drop it.
+        OFF by default (``mirror_memory``): Hermes memory is injected into every
+        session, so the wiki copy is a second, staler source of truth — the
+        mirrored page carried its own ``## Substituído`` section and
+        contradicted the memory block in the same prompt (audit defect 6).
+
+        When the operator turns it on, ``remove`` is still skipped — the native
+        store deleting an entry it owns gets no tombstone, the mirror keeps page
+        history instead — and a ``replace`` keeps the superseded entry from
+        ``metadata["previous_content"]`` so the replacement does not silently
+        drop it.
         """
+        if not self._config.mirror_memory:
+            return
         context = self._snapshot()
         if not self._has_write_scope(context):
             return
@@ -592,32 +617,121 @@ class AiMemoryProvider(MemoryProvider):
     def _search(
         self, args: dict[str, Any], *, context: _OperationContext | None = None
     ) -> dict[str, Any]:
-        query = args.get("query", "")
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            # Audit defect 8: 29 calls went out with no query at all. Nothing
+            # the server could answer, so the store is never touched.
+            return {
+                "ok": False,
+                "results": [],
+                "retry": False,
+                "error": "ai_memory_search needs a non-empty query; nothing was sent to the store.",
+            }
         max_results = args.get("max_results", 5)
         if not isinstance(max_results, int) or isinstance(max_results, bool):
             max_results = 5
         context = context or self._snapshot()
         if context.search_scope == "project" and not context.scope_known:
             return {"ok": False, "error": "Project scope is unknown", "results": []}
-        results = context.client.search(
-            query=query, limit=max_results, **context.search_params()
-        )
+        try:
+            results = context.client.search(
+                query=query, limit=max_results, **context.search_params()
+            )
+        except Exception as exc:
+            log.warning("ai-memory search failed", exc_info=True)
+            return {**self._store_error(exc), "results": []}
         return {"ok": True, "results": results}
+
+    @staticmethod
+    def _store_error(exc: Exception) -> dict[str, Any]:
+        """One clear answer for a failed call, and it is never "try me again".
+
+        A down stack used to surface as a raw ``[Errno 111]`` traceback, which
+        the agent retried instead of treating the store as absent for the turn.
+        """
+        if isinstance(exc, httpx.HTTPStatusError):
+            return {
+                "ok": False,
+                "retry": False,
+                "error": (
+                    f"ai-memory rejected the request (HTTP {exc.response.status_code}); "
+                    "do not retry with the same arguments."
+                ),
+            }
+        return {
+            "ok": False,
+            "unavailable": True,
+            "retry": False,
+            "error": (
+                f"ai-memory store unavailable ({type(exc).__name__}); do not retry — "
+                "carry on with skills, Hermes memory and session_search."
+            ),
+        }
 
     def _write(self, args: dict[str, Any]) -> dict[str, Any]:
         context = self._snapshot()
         if not self._has_write_scope(context):
-            return {"ok": False, "error": "Write disabled: project scope is unknown or non-primary"}
-        result = context.client.write_page(
-            path=args.get("path", ""),
-            body=args.get("body", ""),
-            tags=args.get("tags"),
-            workspace=context.workspace,
-            project=context.project,
-        )
+            return {
+                "ok": False,
+                "retry": False,
+                "error": "Write disabled: project scope is unknown or non-primary",
+            }
+        try:
+            result = context.client.write_page(
+                path=args.get("path", ""),
+                body=args.get("body", ""),
+                tags=args.get("tags"),
+                workspace=context.workspace,
+                project=context.project,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "retry": False,
+                "error": f"ai_memory_write rejected the page: {exc}",
+            }
+        except Exception as exc:
+            log.warning("ai-memory write failed", exc_info=True)
+            return self._store_error(exc)
         if not (result.get("ok", False) or result.get("page_id")):
             return result
-        return {"ok": True, "written": args.get("path")}
+        response: dict[str, Any] = {
+            "ok": True,
+            "written": result.get("path") or args.get("path"),
+        }
+        warning = self._write_warning(result)
+        if warning:
+            response["warning"] = warning
+        if result.get("near_duplicate"):
+            response["near_duplicate"] = result["near_duplicate"]
+        return response
+
+    @staticmethod
+    def _write_warning(result: dict[str, Any]) -> str:
+        """Tell the caller when it wrote over a page instead of updating it."""
+        if result.get("unchanged"):
+            return "The page already held exactly this body; no new version was created."
+        parts: list[str] = []
+        if result.get("existed"):
+            parts.append(
+                "The page already existed ({} chars) and was replaced — this is a new "
+                "version. Read it first and merge next time instead of rewriting.".format(
+                    result.get("previous_chars", 0)
+                )
+            )
+            excerpt = str(result.get("previous_body_excerpt") or "")
+            if excerpt:
+                parts.append(f"What was there before:\n{excerpt}")
+        if result.get("near_duplicate"):
+            parts.append(
+                "A page on the same topic already exists at "
+                f"`{result['near_duplicate']}`; update that page instead of adding a second copy."
+            )
+        return "\n\n".join(parts)
 
     def _status(self) -> dict[str, Any]:
-        return self._client.status()
+        try:
+            return self._client.status()
+        except Exception as exc:
+            log.warning("ai-memory status failed", exc_info=True)
+            return self._store_error(exc)

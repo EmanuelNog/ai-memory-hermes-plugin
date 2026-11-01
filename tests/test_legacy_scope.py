@@ -63,7 +63,12 @@ def test_legacy_defaults_route_to_nearest_marker(
     assert requests[-1].url.params["project"] == project
     assert requests[-1].url.params["workspace"] == workspace
     assert provider._write({"path": "note.md", "body": "private"})["ok"]
-    assert json.loads(requests[-1].content)["project"] == project
+    writes = [
+        json.loads(request.content)
+        for request in requests
+        if request.url.path == "/admin/write-page"
+    ]
+    assert writes[-1]["project"] == project
     assert config_file.read_bytes() == before
 
 

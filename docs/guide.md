@@ -155,9 +155,15 @@ When the conversation ends:
 
 If a close is ever lost (server down at that moment), `ai-memory finalize-session --agent hermes` posts the same event afterwards.
 
-### Memory Mirroring (`on_memory_write`)
+### Memory Mirroring (`on_memory_write`) — off by default
 
-When Hermes writes to built-in `MEMORY.md` or `USER.md`:
+Hermes memory is injected into every session, so a wiki copy of it is a second,
+staler source of truth: the mirrored page carried its own `## Substituído`
+section and could contradict the memory block in the same prompt. Mirroring is
+therefore opt-in — set `mirror_memory` to `true` in `ai-memory.json` (or
+`AI_MEMORY_MIRROR_MEMORY=true`) if you want it anyway.
+
+With it on, when Hermes writes to built-in `MEMORY.md` or `USER.md`:
 
 1. Mirrors the write to the ai-memory wiki via `POST /admin/write-page`
 2. Path: `hermes-memory/{target}.md`
@@ -190,6 +196,19 @@ When Hermes writes to built-in `MEMORY.md` or `USER.md`:
   }
 }
 ```
+
+The write reports what it did, so a rewrite is never blind:
+
+```json
+{"ok": true,
+ "written": "decisions/auth-flow.md",
+ "warning": "The page already existed (512 chars) and was replaced — this is a new version. Read it first and merge next time instead of rewriting.\n\nWhat was there before:\n# Auth Flow …"}
+```
+
+- the path is normalised (`.md` forced, `./` and `//` dropped), so one fact is one page;
+- an identical body already live is a no-op (`no new version was created`);
+- a near-duplicate on another path comes back as `near_duplicate: <path>`;
+- if the store is down the answer is `{"ok": false, "unavailable": true, "retry": false, …}` — carry on without the wiki, do not retry.
 
 ### `ai_memory_status`
 

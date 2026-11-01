@@ -34,7 +34,7 @@ Connects [Hermes Agent](https://github.com/NousResearch/hermes-agent) to [ai-mem
 - **Turn capture** — async daemon-thread sync after each completed turn
 - **Pre-compaction checkpointing** — `pre-compact` hook on context compression (fork addition; see note above)
 - **Session finalization** — `session-end` hook on conversation close (the session id only, never the transcript)
-- **Memory mirroring** — built-in `MEMORY.md` / `USER.md` writes (`add`, `replace`) mirrored to the ai-memory wiki
+- **Memory mirroring (opt-in)** — `mirror_memory: true` mirrors built-in `MEMORY.md` / `USER.md` writes (`add`, `replace`) into the wiki; off by default, because memory is already injected every session and a wiki copy only goes stale
 - **Hermes CLI integration** — `hermes memory setup` plus the plugin's own `hermes ai-memory status | config | config-set | link | update`
 - **Scope that matches the other agents** — explicit config, then the checkout's `.ai-memory.toml`, then the Hermes profile
 - **Safe in non-primary runs** — cron/subagent providers neither write nor consume the single-use handoff
@@ -83,7 +83,7 @@ Hermes Agent → MemoryProvider ABC → AiMemoryProvider → AiMemoryClient → 
 | `recall_status()` | Hit count of the last `prefetch`, for the recall indicator | Sync |
 | `sync_turn(user, assistant)` | `POST /hook?event=user-prompt-submit` | Daemon thread |
 | `on_session_end(messages)` | `POST /hook?event=session-end` (session id only) | Daemon thread |
-| `on_memory_write(action, target, content)` | `POST /admin/write-page` for `add` / `replace` | Sync |
+| `on_memory_write(action, target, content)` | `POST /admin/write-page` for `add` / `replace`, only with `mirror_memory` on | Sync |
 | `handle_tool_call(name, args)` | Routes to search/write/status | Sync |
 
 ## Configuration
