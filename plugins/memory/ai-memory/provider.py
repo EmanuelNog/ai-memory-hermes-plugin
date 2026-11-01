@@ -16,7 +16,7 @@ _PLUGIN_DIR = str(Path(__file__).resolve().parent)
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 
-from client import SESSION_END_TIMEOUT, AiMemoryClient  # noqa: E402
+from client import SESSION_END_TIMEOUT, AiMemoryClient, hit_scope  # noqa: E402
 from aimemory_config import (  # noqa: E402
     AiMemoryConfig,
     explicit_scope_keys,
@@ -358,10 +358,13 @@ class AiMemoryProvider(MemoryProvider):
 
     @staticmethod
     def _format_recall(hits: list[dict[str, Any]]) -> str:
-        """One block per hit, labelled with its page path when the server sends one.
+        """One block per hit, labelled with its page path and its scope.
 
         Global is the legacy default; project mode restricts the search.
-        Both modes label recalled facts with their source page.
+        A page name alone cannot tell two projects apart, so a hit the server
+        attributed to a scope carries it (`[workspace/project]`), and a hit that
+        collapsed identical rows names the other scopes under `also in`
+        (audit defect 2).
         """
         lines: list[str] = []
         for hit in hits:
@@ -369,6 +372,12 @@ class AiMemoryProvider(MemoryProvider):
             title = str(hit.get("title", ""))
             path = str(hit.get("path", ""))
             label = f"{title} ({path})" if title and path else (path or title)
+            scope = hit_scope(hit)
+            if label and scope:
+                label = f"{label} [{scope}]"
+            also = hit.get("also_in")
+            if label and isinstance(also, list) and also:
+                label = f"{label} (also in {', '.join(str(item) for item in also)})"
             lines.append(f"{label}: {snippet}" if label else snippet)
         return "\n\n".join(lines)
 

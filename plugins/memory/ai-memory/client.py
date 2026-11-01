@@ -127,6 +127,21 @@ def _path_query(path: str) -> str:
     return " ".join(part for part in _PATH_SPLIT_RE.split(leaf) if len(part) > 2)
 
 
+def hit_scope(hit: dict[str, Any]) -> str:
+    """``workspace/project`` the server attributed a hit to, or ``""``.
+
+    ai-memory 3.3.0 puts both on every ``/admin/search`` hit, and a page name
+    alone cannot tell two projects apart -- four projects each hold their own
+    ``index.md`` (audit defect 2). A hit without the fields predates that, and
+    is simply unlabelled.
+    """
+    workspace = str(hit.get("workspace") or "")
+    project = str(hit.get("project") or "")
+    if workspace and project:
+        return f"{workspace}/{project}"
+    return project or workspace
+
+
 class AiMemoryClient:
     def __init__(self, config: AiMemoryConfig) -> None:
         self.config = config

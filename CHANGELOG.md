@@ -4,6 +4,14 @@
 
 ### Fixed
 
+- **Recall hits name their project.** `prefetch()` labelled every hit
+  `title (path)`, so four projects' `index.md` (and two `hermes-notifier` pages)
+  rendered as identical lines — the path leaf cannot tell two projects apart.
+  The ai-memory 3.3.0 server already sends `workspace` and `project` on each
+  `/admin/search` hit; `hit_scope()` now carries them into the block as
+  `[workspace/project]`. Client-side collapsing of same-named rows was measured
+  and rejected: 781 live hits over 24 queries contained no true duplicate, so the
+  four `index.md` rows are four different project indexes, not one fact copied.
 - **One page per fact.** `write_page()` normalises the path (`normalise_page_path()`:
   drop `./` and a leading `/`, collapse `//`, force `.md`), because ai-memory keys
   a page by its literal path and `_rules/x` vs `_rules/x.md` were both `is_latest=1`
